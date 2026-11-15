@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV5 } = require('@ton/ton'); // V4 yerine V5 import edildi
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
-https = require('https');
+const https = require('https');
 
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
@@ -50,14 +50,12 @@ async function initClient() {
   } catch (err) {}
 }
 
-// Keeper (V5) uyumlu cüzdan türetme fonksiyonu
 async function getWalletInstance() {
   const words = MNEMONIC_PHRASE.trim().split(/\s+/);
   if (words.length < 12) throw new Error("Mnemonic kelimeleri eksik!");
   
   const keyPair = await mnemonicToPrivateKey(words);
-  // Keeper ile tam uyumlu WalletContractV5
-  const wallet = WalletContractV5.create({ publicKey: keyPair.publicKey, workchain: 0 });
+  const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
   return tonClient.open(wallet);
 }
 
@@ -90,11 +88,11 @@ bot.on('message', async (msg) => {
       const wallet = await getWalletInstance();
       const walletAddress = wallet.address.toString({ bounceable: false });
 
-      await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor (V5 Mode)...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
 
       const assetInfo = await getGramBalance(walletAddress);
       
-      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu (Keeper V5)*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.symbol}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.symbol}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
     } catch (err) {
       await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
     }
@@ -145,7 +143,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot V5 Modunda Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
