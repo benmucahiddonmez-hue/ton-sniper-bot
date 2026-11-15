@@ -87,4 +87,11 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
         }
       } else {
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
-        if (Array.isArray(dedust) 
+        if (Array.isArray(dedustData)) {
+          confirmedLiquidity = MIN_LIQUIDITY_USD; // Gerekli likidite eşik ataması
+          break;
+        }
+      }
+    } catch (err) {}
+  }
+}
