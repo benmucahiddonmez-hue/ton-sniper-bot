@@ -49,8 +49,10 @@ async function initClient() {
       endpoint: 'https://toncenter.com/api/v2/jsonRPC'
     });
     console.log("TON istemcisi başlatıldı.");
+    await sendAlert("🚀 *Bot başarıyla başlatıldı ve çalışıyor!*"); // İşte buraya, süslü parantezin içine yazmalısın
   } catch (err) {}
 }
+
 
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
   const checkInterval = setInterval(async () => {
