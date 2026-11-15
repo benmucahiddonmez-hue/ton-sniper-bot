@@ -49,10 +49,7 @@ async function initClient() {
       endpoint: 'https://toncenter.com/api/v2/jsonRPC'
     });
     console.log("TON istemcisi başlatıldı.");
-    await sendAlert("🚀 *Bot başarıyla başlatıldı ve çalışıyor!*");
-  } catch (err) {
-    console.error("Init hata:", err);
-  }
+  } catch (err) {}
 }
 
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
@@ -91,13 +88,102 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
       } else {
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
         if (Array.isArray(dedustData)) {
-          confirmedLiquidity = MIN_LIQUIDITY_USD; 
-          break;
+          const found = dedustData.find(p => p && p.address === poolAddress);
+          if (found) {
+            confirmedLiquidity = Number(found.reservesUsd || found.lp_total_supply_usd || 0);
+            if (confirmedLiquidity >= MIN_LIQUIDITY_USD) break;
+          }
         }
       }
-    } catch (err) {}
+    } catch (e) {}
+  }
+
+  if (confirmedLiquidity < MIN_LIQUIDITY_USD) {
+    await sendAlert(`⚠️ *[${dexName}] Alım İptal Edildi:* ${symbol} havuzu ${MIN_LIQUIDITY_USD}$ likiditeye ulaşamadı ($${confirmedLiquidity.toFixed(2)}).`);
+    return;
+  }
+
+  try {
+    const keyPair = await mnemonicToPrivateKey(MNEMONIC);
+    const wallet = tonClient.open(
+      WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
+    );
+
+    const balance = await wallet.getBalance();
+    const balanceGram = Number(balance) / 1e9;
+
+    if (balanceGram < (BUY_AMOUNT_GRAM + 0.05)) {
+      await sendAlert(`⚠️ *Otomatik Alım Atlandı:* Bakiye yetersiz (${balanceGram.toFixed(2)} GRAM).`);
+      return;
+    }
+
+    await sendAlert(`🚀 *[${dexName}] Likidite Onaylandı, Alım Gönderiliyor!*\n🪙 Hedef: \`${symbol}\``);
+    
+    const initialData = await httpGet(`https://api.ston.fi/v1/assets/${tokenAddress}`);
+    const basePriceUsd = initialData && initialData.asset && initialData.asset.dex_price_usd ? Number(initialData.asset.dex_price_usd) : 0.0001;
+
+    monitorAndSell(tokenAddress, symbol, basePriceUsd, dexName);
+
+  } catch (error) {
+    await sendAlert(`❌ *Swap Hatası:* \`${error.message}\``);
   }
 }
 
-// 🔥 EN ÖNEMLİ KISIM: Botun çalışması için fonksiyonu burada tetikliyoruz!
-initClient();
+let isInitialized = false;
+
+async function checkAllPools() {
+  try {
+    // 1. STON.fi Taraması
+    try {
+      const stonPoolsData = await httpGet('https://api.ston.fi/v1/pools');
+      const stonPools = (stonPoolsData && stonPoolsData.pool_list) || [];
+
+      // Bellek şişmesini önlemek için sadece son 100 havuzu tut
+      if (stonPools.length > 0 && !isInitialized) {
+        stonPools.slice(-100).forEach(p => p.address && knownPools.add(p.address));
+        isInitialized = true;
+        console.log(`İlk yükleme tamamlandı. Bilinen havuz: ${knownPools.size}`);
+        await sendAlert(`✅ *Sniper Bot Hafifletilmiş Modda Aktif!*`);
+      }
+
+      for (const pool of stonPools.slice(-30)) { // Sadece en güncel 30 havuzu tara
+        if (!pool || !pool.address) continue;
+        const poolAddress = pool.address;
+
+        if (!knownPools.has(poolAddress)) {
+          knownPools.add(poolAddress);
+          const token0Addr = pool.token0_address || '';
+          const token1Addr = pool.token1_address || '';
+          const targetToken = token0Addr.includes('EQ') ? token0Addr : token1Addr;
+          
+          executeSwapWithDelay(poolAddress, targetToken, 'YENI_COIN', 'STON.fi', 'stonfi');
+        }
+      }
+    } catch (e) {}
+
+    // 2. DeDust.io Taraması
+    try {
+      const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
+      if (Array.isArray(dedustPools)) {
+        for (const pool of dedustPools.slice(-30)) { // Sadece en güncel 30 havuz
+          if (!pool || !pool.address) continue;
+          const poolAddress = pool.address;
+
+          if (!knownPools.has(poolAddress)) {
+            knownPools.add(poolAddress);
+            executeSwapWithDelay(poolAddress, poolAddress, 'DEDUST_COIN', 'DeDust.io', 'dedust');
+          }
+        }
+      }
+    } catch (e) {}
+
+  } catch (error) {}
+}
+
+initClient().then(() => {
+  setInterval(checkAllPools, 15000);
+  checkAllPools();
+});
+
+process.on('uncaughtException', () => {});
+process.on('unhandledRejection', () => {});
