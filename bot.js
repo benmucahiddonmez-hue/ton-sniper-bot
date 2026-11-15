@@ -14,6 +14,7 @@ const STOP_LOSS_PERCENT = Number(process.env.STOP_LOSS_PERCENT || 30);
 const bot = new TelegramBot(TG_TOKEN, { polling: false });
 
 let knownPools = new Set();
+let isFirstRun = true;
 let tonClient = null;
 
 function httpGet(url) {
@@ -129,8 +130,6 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
   }
 }
 
-let isInitialized = false;
-
 async function checkAllPools() {
   try {
     // 1. STON.fi Taraması
@@ -138,25 +137,21 @@ async function checkAllPools() {
       const stonPoolsData = await httpGet('https://api.ston.fi/v1/pools');
       const stonPools = (stonPoolsData && stonPoolsData.pool_list) || [];
 
-      // Bellek şişmesini önlemek için sadece son 100 havuzu tut
-      if (stonPools.length > 0 && !isInitialized) {
-        stonPools.slice(-100).forEach(p => p.address && knownPools.add(p.address));
-        isInitialized = true;
-        console.log(`İlk yükleme tamamlandı. Bilinen havuz: ${knownPools.size}`);
-        await sendAlert(`✅ *Sniper Bot Hafifletilmiş Modda Aktif!*`);
-      }
+      if (isFirstRun) {
+        stonPools.forEach(p => p.address && knownPools.add(p.address));
+      } else {
+        for (const pool of stonPools) {
+          if (!pool || !pool.address) continue;
+          const poolAddress = pool.address;
 
-      for (const pool of stonPools.slice(-30)) { // Sadece en güncel 30 havuzu tara
-        if (!pool || !pool.address) continue;
-        const poolAddress = pool.address;
-
-        if (!knownPools.has(poolAddress)) {
-          knownPools.add(poolAddress);
-          const token0Addr = pool.token0_address || '';
-          const token1Addr = pool.token1_address || '';
-          const targetToken = token0Addr.includes('EQ') ? token0Addr : token1Addr;
-          
-          executeSwapWithDelay(poolAddress, targetToken, 'YENI_COIN', 'STON.fi', 'stonfi');
+          if (!knownPools.has(poolAddress)) {
+            knownPools.add(poolAddress);
+            const token0Addr = pool.token0_address || '';
+            const token1Addr = pool.token1_address || '';
+            const targetToken = token0Addr.includes('EQ') ? token0Addr : token1Addr;
+            
+            executeSwapWithDelay(poolAddress, targetToken, 'YENI_COIN', 'STON.fi', 'stonfi');
+          }
         }
       }
     } catch (e) {}
@@ -165,17 +160,27 @@ async function checkAllPools() {
     try {
       const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustPools)) {
-        for (const pool of dedustPools.slice(-30)) { // Sadece en güncel 30 havuz
-          if (!pool || !pool.address) continue;
-          const poolAddress = pool.address;
+        if (isFirstRun) {
+          dedustPools.forEach(p => p.address && knownPools.add(p.address));
+        } else {
+          for (const pool of dedustPools) {
+            if (!pool || !pool.address) continue;
+            const poolAddress = pool.address;
 
-          if (!knownPools.has(poolAddress)) {
-            knownPools.add(poolAddress);
-            executeSwapWithDelay(poolAddress, poolAddress, 'DEDUST_COIN', 'DeDust.io', 'dedust');
+            if (!knownPools.has(poolAddress)) {
+              knownPools.add(poolAddress);
+              executeSwapWithDelay(poolAddress, poolAddress, 'DEDUST_COIN', 'DeDust.io', 'dedust');
+            }
           }
         }
       }
     } catch (e) {}
+
+    if (isFirstRun) {
+      isFirstRun = false;
+      console.log(`İlk tarama tamamlandı. Bilinen havuz sayısı: ${knownPools.size}`);
+      await sendAlert(`✅ *Sniper Bot Temiz Modda Aktif!*`);
+    }
 
   } catch (error) {}
 }
