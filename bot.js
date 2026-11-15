@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -7,7 +7,7 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const MNEMONIC = process.env.WALLET_MNEMONIC ? process.env.WALLET_MNEMONIC.split(' ') : [];
 const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 50);
-const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5); // Harcama miktarı GRAM bazlı
+const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
 const TAKE_PROFIT_PERCENT = Number(process.env.TAKE_PROFIT_PERCENT || 50);
 const STOP_LOSS_PERCENT = Number(process.env.STOP_LOSS_PERCENT || 30);
 
@@ -19,17 +19,22 @@ let tonClient = null;
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, { timeout: 7000 }, (res) => {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
         try {
           resolve(JSON.parse(data));
         } catch (e) {
-          reject(e);
+          reject(new Error('JSON parse hatası'));
         }
       });
-    }).on('error', (err) => reject(err));
+    });
+    req.on('error', (err) => reject(err));
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('API İstek Zaman Aşımı'));
+    });
   });
 }
 
@@ -69,9 +74,9 @@ async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
         await sendAlert(`${reason} tetiklendi!\n🏢 *Borsa:* \`${dexName}\`\n🪙 *Token:* \`${symbol}\`\n📊 *Oran:* \`%${priceChangePercent.toFixed(2)}\``);
       }
     } catch (err) {
-      console.error(`Fiyat takip hatası (${symbol}):`, err.message);
+      // Fiyat takip hatalarını yut, çökmesin
     }
-  }, 10000);
+  }, 12000);
 }
 
 async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, checkType) {
@@ -100,7 +105,7 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
         }
       }
     } catch (e) {
-      console.error("Likidite kontrol hatası:", e.message);
+      // Kontrol aşamasındaki hatalar atlanır
     }
   }
 
@@ -115,7 +120,6 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
       WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
     );
 
-    // Cüzdan bakiye kontrolü (GRAM token varlığı baz alınarak güncellendi)
     const balance = await wallet.getBalance();
     const balanceGram = Number(balance) / 1e9;
 
@@ -132,7 +136,6 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
     monitorAndSell(tokenAddress, symbol, basePriceUsd, dexName);
 
   } catch (error) {
-    console.error("Swap işlem hatası:", error.message);
     await sendAlert(`❌ *Swap Hatası:* \`${error.message}\``);
   }
 }
@@ -168,75 +171,4 @@ async function checkAllPools() {
           const token0Addr = pool.token0_address || '';
           const token1Addr = pool.token1_address || '';
           const symbol0 = stonAssetMap[token0Addr] || 'COIN';
-          const symbol1 = stonAssetMap[token1Addr] || 'COIN';
-
-          const targetToken = symbol0 !== 'GRAM' ? token0Addr : token1Addr;
-          const targetSymbol = symbol0 !== 'GRAM' ? symbol0 : symbol1;
-          
-          executeSwapWithDelay(poolAddress, targetToken, targetSymbol, 'STON.fi', 'stonfi');
-        }
-      }
-    } catch (stonErr) {
-      console.error("STON.fi tarama hatası:", stonErr.message);
-    }
-
-    // 2. DeDust.io Taraması
-    try {
-      const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
-      if (Array.isArray(dedustPools)) {
-        for (const pool of dedustPools) {
-          if (!pool || !pool.address) continue;
-          const poolAddress = pool.address;
-
-          if (isFirstRun) {
-            knownPools.add(poolAddress);
-            continue;
-          }
-
-          if (!knownPools.has(poolAddress)) {
-            knownPools.add(poolAddress);
-            
-            let symbol = 'DEDUST_COIN';
-            let tokenAddress = poolAddress;
-
-            try {
-              if (pool.assets && Array.isArray(pool.assets)) {
-                const nonGramAsset = pool.assets.find(a => a && a.symbol && a.symbol.toUpperCase() !== 'GRAM');
-                if (nonGramAsset) {
-                  symbol = nonGramAsset.symbol;
-                  tokenAddress = nonGramAsset.address || poolAddress;
-                }
-              }
-            } catch (innerErr) {}
-
-            executeSwapWithDelay(poolAddress, tokenAddress, symbol, 'DeDust.io', 'dedust');
-          }
-        }
-      }
-    } catch (dedustErr) {
-      console.error("DeDust tarama hatası:", dedustErr.message);
-    }
-
-    if (isFirstRun) {
-      isFirstRun = false;
-      console.log(`Çift Borsalı Tarama Aktif (GRAM Bazlı). Toplam bilinen havuz: ${knownPools.size}`);
-      await sendAlert(`✅ *Çift Borsalı (STON.fi + DeDust) Sniper Aktif (GRAM Destekli)!*`);
-    }
-
-  } catch (error) {
-    console.error('Genel tarama döngü hatası:', error.message);
-  }
-}
-
-initClient().then(() => {
-  setInterval(checkAllPools, 10000);
-  checkAllPools();
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Kritik Hata Yakalandı:', err.message);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('İşlenmeyen Sözleşme Hatası:', reason);
-});
+          const symbol1 = ston
