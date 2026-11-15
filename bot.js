@@ -49,10 +49,11 @@ async function initClient() {
       endpoint: 'https://toncenter.com/api/v2/jsonRPC'
     });
     console.log("TON istemcisi başlatıldı.");
-    await sendAlert("🚀 *Bot başarıyla başlatıldı ve çalışıyor!*"); // İşte buraya, süslü parantezin içine yazmalısın
-  } catch (err) {}
+    await sendAlert("🚀 *Bot başarıyla başlatıldı ve çalışıyor!*");
+  } catch (err) {
+    console.error("Init hata:", err);
+  }
 }
-
 
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
   const checkInterval = setInterval(async () => {
@@ -90,10 +91,13 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
       } else {
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
         if (Array.isArray(dedustData)) {
-          confirmedLiquidity = MIN_LIQUIDITY_USD; // Gerekli likidite eşik ataması
+          confirmedLiquidity = MIN_LIQUIDITY_USD; 
           break;
         }
       }
     } catch (err) {}
   }
 }
+
+// 🔥 EN ÖNEMLİ KISIM: Botun çalışması için fonksiyonu burada tetikliyoruz!
+initClient();
