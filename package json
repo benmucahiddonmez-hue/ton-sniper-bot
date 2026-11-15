@@ -1,0 +1,15 @@
+{
+  "name": "ton-sniper-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@ston-fi/api": "^0.3.0",
+    "@ston-fi/sdk": "^2.1.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^15.1.0",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
