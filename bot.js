@@ -50,34 +50,25 @@ async function initClient() {
   } catch (err) {}
 }
 
-// Güçlendirilmiş GRAM Bakiye Sorgulama (Alternatif endpoint taramalı)
+// Cüzdandaki tüm jetonları tarayıp GRAM veya herhangi bir jeton bakiyesini esnek bulan fonksiyon
 async function getGramBalance(walletAddress) {
   try {
-    const gramMasterAddress = "EQC470UtbruUTvvKoqHE46aHk1nU5aJgOq3q3r_Xn3jK91Wl";
-    
-    // Yöntem 1: getAccountJettons
     const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     const data = await httpGet(url);
+    
     if (data && data.ok && Array.isArray(data.result)) {
-      const gramAsset = data.result.find(j => 
-        j.jetton_address === gramMasterAddress || 
-        (j.symbol && j.symbol.toUpperCase() === 'GRAM')
-      );
-      if (gramAsset && gramAsset.balance) {
-        return Number(gramAsset.balance) / 1e9;
-      }
-    }
-
-    // Yöntem 2: Alternatif Toncenter v3/v2 jettonwallets endpoint kontrolü
-    const altUrl = `https://toncenter.com/api/v2/getJettonWallets?owner_address=${walletAddress}&jetton_address=${gramMasterAddress}`;
-    const altData = await httpGet(altUrl);
-    if (altData && altData.ok && altData.result) {
-      if (altData.result.balance) {
-        return Number(altData.result.balance) / 1e9;
+      // Cüzdanda bulunan tüm jetonları tarar (isimde veya sembolde GRAM geçen ya da jeton balansına sahip olanlar)
+      for (const j of data.result) {
+        const symbol = j.symbol || (j.metadata && j.metadata.symbol) || '';
+        const balance = j.balance ? Number(j.balance) / 1e9 : 0;
+        
+        if (symbol.toUpperCase().includes('GRAM') || balance > 0) {
+          return { symbol: symbol || 'GRAM', balance: balance };
+        }
       }
     }
   } catch (e) {}
-  return 0;
+  return { symbol: 'GRAM', balance: 0 };
 }
 
 // Telegram /bakiye komutu dinleyicisi
@@ -101,9 +92,9 @@ bot.on('message', async (msg) => {
 
       await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
 
-      const balanceGram = await getGramBalance(walletAddress);
+      const assetInfo = await getGramBalance(walletAddress);
       
-      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **GRAM Miktarı:** \`${balanceGram.toFixed(2)} GRAM\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.assetSymbol || 'GRAM'}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
     } catch (err) {
       await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
     }
