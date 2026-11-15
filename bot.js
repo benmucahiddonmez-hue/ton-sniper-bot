@@ -141,13 +141,22 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
   }
 }
 
+let scanCount = 0;
+
 async function checkAllPools() {
+  scanCount++;
+  let stonCount = 0;
+  let dedustCount = 0;
+  let newFoundCount = 0;
+
   try {
+    // 1. STON.fi Taraması
     try {
       const stonPoolsData = await httpGet('https://api.ston.fi/v1/pools');
       const stonAssetsData = await httpGet('https://api.ston.fi/v1/assets');
       
       const stonPools = (stonPoolsData && stonPoolsData.pool_list) || [];
+      stonCount = stonPools.length;
       const stonAssets = (stonAssetsData && stonAssetsData.asset_list) || [];
       const stonAssetMap = {};
       
@@ -166,6 +175,7 @@ async function checkAllPools() {
 
           if (!knownPools.has(poolAddress)) {
             knownPools.add(poolAddress);
+            newFoundCount++;
             const token0Addr = pool.token0_address || '';
             const token1Addr = pool.token1_address || '';
             
@@ -181,9 +191,11 @@ async function checkAllPools() {
       }
     } catch (e) {}
 
+    // 2. DeDust.io Taraması
     try {
       const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustPools)) {
+        dedustCount = dedustPools.length;
         if (isFirstRun) {
           dedustPools.forEach(p => p.address && knownPools.add(p.address));
         } else {
@@ -193,6 +205,7 @@ async function checkAllPools() {
 
             if (!knownPools.has(poolAddress)) {
               knownPools.add(poolAddress);
+              newFoundCount++;
               
               let symbol = 'DEDUST_COIN';
               let tokenAddress = poolAddress;
@@ -215,8 +228,10 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`İlk tarama tamamlandı. Bilinen havuz sayısı: ${knownPools.size}`);
-      await sendAlert(`✅ *Sniper Bot Tam Donanımlı Modda Aktif!*`);
+      await sendAlert(`✅ *Sniper Bot Canlı Rapor Modunda Aktif!*\n📊 STON.fi: ${stonCount} havuz\n📊 DeDust: ${dedustCount} havuz tarandı.`);
+    } else if (scanCount % 20 === 0) {
+      // Her 5 dakikada bir (20 * 15sn) botun hala çalıştığını ve borsaları taradığını gösteren durum özeti atar
+      await sendAlert(`🔍 *Bot Durum Raporu:* Tarama aktif. (İncelenen STON: ${stonCount}, DeDust: ${dedustCount} | Hafıza: ${knownPools.size} havuz)`);
     }
 
   } catch (error) {}
