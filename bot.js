@@ -1,17 +1,19 @@
+const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
 
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
-const MNEMONIC = process.env.WALLET_MNEMONIC ? process.env.WALLET_MNEMONIC.split(' ') : [];
-const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 50);
 const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
+
+// Telegram botunu polling (mesaj dinleme) aktif olarak başlatıyoruz
+const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
 let knownPools = new Set();
 let isFirstRun = true;
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { timeout: 6000 }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 6000 }, (res) => {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
@@ -30,77 +32,63 @@ function httpGet(url) {
   });
 }
 
-async function sendTelegram(message) {
-  if (!TG_TOKEN || !TG_CHAT_ID) return;
-  const postData = JSON.stringify({
-    chat_id: TG_CHAT_ID,
-    text: message,
-    parse_mode: 'Markdown',
-    disable_web_page_preview: true
-  });
-
-  const options = {
-    hostname: 'api.telegram.org',
-    port: 443,
-    path: `/bot${TG_TOKEN}/sendMessage`,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData)
-    }
-  };
-
-  return new Promise((resolve) => {
-    const req = https.request(options, (res) => {
-      resolve();
-    });
-    req.on('error', () => resolve());
-    req.write(postData);
-    req.end();
-  });
+async function sendAlert(message) {
+  try {
+    await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+  } catch (err) {}
 }
+
+// Telegram'dan gelen /bakiye komutunu yakalayan güvenli dinleyici
+bot.on('message', async (msg) => {
+  if (!msg || !msg.text) return;
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  if (text === '/bakiye') {
+    try {
+      await bot.sendMessage(chatId, `💰 *Cüzdan Durumu:* Bot aktif ve çalışıyor.\n- **İşlem Miktarı:** \`${BUY_AMOUNT_GRAM} GRAM\`\n- **İzlenen Havuz Sayısı:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+    } catch (err) {}
+  }
+});
 
 async function checkAllPools() {
   try {
     let stonCount = 0;
     let dedustCount = 0;
 
-    // STON.fi Taraması
+    // 1. STON.fi Taraması
     try {
-      const stonPoolsData = await httpGet('[https://api.ston.fi/v1/pools](https://api.ston.fi/v1/pools)');
-      const stonPools = (stonPoolsData && stonPoolsData.pool_list) || [];
-      stonCount = stonPools.length;
-
-      if (isFirstRun) {
-        stonPools.forEach(p => p.address && knownPools.add(p.address));
-      } else {
-        for (const pool of stonPools) {
-          if (!pool || !pool.address) continue;
-          const poolAddress = pool.address;
-
-          if (!knownPools.has(poolAddress)) {
-            knownPools.add(poolAddress);
-            await sendTelegram(`⏳ *[STON.fi] Yeni Havuz Yakalandı!*\n📍 Adres: \`${poolAddress}\``);
+      const stonData = await httpGet('https://api.ston.fi/v1/pools');
+      const pools = stonData && (stonData.pool_list || stonData.pools || stonData);
+      if (Array.isArray(pools)) {
+        stonCount = pools.length;
+        if (isFirstRun) {
+          pools.forEach(p => p.address && knownPools.add(p.address));
+        } else {
+          for (const pool of pools) {
+            if (!pool || !pool.address) continue;
+            if (!knownPools.has(pool.address)) {
+              knownPools.add(pool.address);
+              await sendAlert(`⏳ *[STON.fi] Yeni Havuz Yakalandı!*\n📍 Adres: \`${pool.address}\``);
+            }
           }
         }
       }
     } catch (e) {}
 
-    // DeDust.io Taraması
+    // 2. DeDust.io Taraması
     try {
-      const dedustPools = await httpGet('[https://api.dedust.io/v2/pools](https://api.dedust.io/v2/pools)');
-      if (Array.isArray(dedustPools)) {
-        dedustCount = dedustPools.length;
+      const dedustData = await httpGet('https://api.dedust.io/v2/pools');
+      if (Array.isArray(dedustData)) {
+        dedustCount = dedustData.length;
         if (isFirstRun) {
-          dedustPools.forEach(p => p.address && knownPools.add(p.address));
+          dedustData.forEach(p => p.address && knownPools.add(p.address));
         } else {
-          for (const pool of dedustPools) {
+          for (const pool of dedustData) {
             if (!pool || !pool.address) continue;
-            const poolAddress = pool.address;
-
-            if (!knownPools.has(poolAddress)) {
-              knownPools.add(poolAddress);
-              await sendTelegram(`⏳ *[DeDust.io] Yeni Havuz Yakalandı!*\n📍 Adres: \`${poolAddress}\``);
+            if (!knownPools.has(pool.address)) {
+              knownPools.add(pool.address);
+              await sendAlert(`⏳ *[DeDust.io] Yeni Havuz Yakalandı!*\n📍 Adres: \`${pool.address}\``);
             }
           }
         }
@@ -110,7 +98,7 @@ async function checkAllPools() {
     if (isFirstRun) {
       isFirstRun = false;
       console.log(`İlk tarama tamamlandı. STON: ${stonCount}, DeDust: ${dedustCount}`);
-      await sendTelegram(`✅ *Sniper Bot Kararlı Modda Başlatıldı!*\n📊 STON: ${stonCount} | DeDust: ${dedustCount} havuz tarandı.`);
+      await sendAlert(`✅ *Sniper Bot Kararlı Modda Başlatıldı!*\n📊 STON: ${stonCount} | DeDust: ${dedustCount} havuz tarandı.`);
     }
 
   } catch (error) {
