@@ -1,17 +1,21 @@
 const TelegramBot = require('node-telegram-bot-api');
 
-// Railway panelinden gireceğimiz gizli değişkenler
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
+
+if (!TG_TOKEN || !TG_CHAT_ID) {
+  console.error("Telegram Bot Token veya Chat ID eksik!");
+}
+
 const bot = new TelegramBot(TG_TOKEN, { polling: false });
 
-// Bilinen havuzları hafızada tutacağımız liste
 let knownPools = new Set();
 let isFirstRun = true;
 
 async function sendAlert(message) {
   try {
     await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown' });
+    console.log("Telegram bildirimi gönderildi.");
   } catch (err) {
     console.error('Telegram mesaj hatası:', err.message);
   }
@@ -19,7 +23,6 @@ async function sendAlert(message) {
 
 async function checkStonFiPools() {
   try {
-    // STON.fi API üzerinden aktif havuzları çekiyoruz
     const response = await fetch('https://api.ston.fi/v1/pools');
     const data = await response.json();
     const pools = data.pool_list || [];
@@ -27,13 +30,13 @@ async function checkStonFiPools() {
     for (const pool of pools) {
       const poolAddress = pool.address;
 
-      // İlk açılışta mevcut binlerce havuzu hafızaya al (eski coinler için alarm çalmasın)
+      // İlk çalıştırmada mevcut havuzları hafızaya alıyoruz (eski coinler alarm üretmesin diye)
       if (isFirstRun) {
         knownPools.add(poolAddress);
         continue;
       }
 
-      // Daha önce listede olmayan YENİ BİR HAVUZ yakalandığında:
+      // Eğer listede olmayan yepyeni bir havuz çıkarsa:
       if (!knownPools.has(poolAddress)) {
         knownPools.add(poolAddress);
         
@@ -43,17 +46,15 @@ async function checkStonFiPools() {
                          `🪙 *Token 1:* \`${pool.token1_address}\`\n` +
                          `💧 *Likidite (USD):* $${Number(pool.lp_total_supply_usd || 0).toFixed(2)}`;
         
-        console.log('Yeni havuz bulundu:', poolAddress);
+        console.log('Yeni havuz bulundu ve bildiriliyor:', poolAddress);
         await sendAlert(alertMsg);
-        
-        // OTOMATİK ALIM (SWAP) KODU BURAYA EKLENECEK
       }
     }
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`Başlangıç tamamlandı. ${knownPools.size} mevcut havuz hafızaya alındı. Yeni coinler bekleniyor...`);
-      await sendAlert(`✅ *Bot Aktif!* ${knownPools.size} mevcut havuz tarandı. Yeni listelemeler bekleniyor...`);
+      console.log(`Başlangıç tamamlandı. ${knownPools.size} mevcut havuz hafızaya alındı. Yeni listelemeler bekleniyor...`);
+      await sendAlert(`✅ *Bot Aktif ve Tarıyor!* ${knownPools.size} mevcut havuz tarandı. Yeni coin bekleniyor...`);
     }
 
   } catch (error) {
@@ -61,6 +62,6 @@ async function checkStonFiPools() {
   }
 }
 
-// Her 5 saniyede bir yeni havuz kontrolü yap
+// Her 5 saniyede bir kontrol et
 setInterval(checkStonFiPools, 5000);
 checkStonFiPools();
