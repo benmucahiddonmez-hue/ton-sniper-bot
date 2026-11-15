@@ -87,4 +87,4 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
         }
       } else {
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
-        if (Array.isArray(dedust
+        if (Array.isArray(dedust) 
