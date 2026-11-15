@@ -52,20 +52,16 @@ async function initClient() {
   }
 }
 
-// Kar Al / Zarar Durdur (TP/SL) Takibi
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
   console.log(`${dexName} - ${symbol} için fiyat takibi başlatıldı...`);
   
   const checkInterval = setInterval(async () => {
     try {
-      // Fiyatı STON.fi veya genel asset API'sinden takip etmeye devam ediyoruz
       const data = await httpGet(`https://api.ston.fi/v1/assets/${tokenAddress}`);
       if (!data || !data.asset || !data.asset.dex_price_usd) return;
 
       const currentPriceUsd = Number(data.asset.dex_price_usd);
       const priceChangePercent = ((currentPriceUsd - buyPriceUsd) / buyPriceUsd) * 100;
-
-      console.log(`${symbol} Anlık Değişim (%): ${priceChangePercent.toFixed(2)}`);
 
       if (priceChangePercent >= TAKE_PROFIT_PERCENT || priceChangePercent <= -STOP_LOSS_PERCENT) {
         clearInterval(checkInterval);
@@ -78,12 +74,8 @@ async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
   }, 10000);
 }
 
-// Ortak Alım ve Likidite Bekleme Mekanizması
 async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, checkType) {
-  if (MNEMONIC.length < 12) {
-    console.log("Cüzdan mnemonic eksik.");
-    return;
-  }
+  if (MNEMONIC.length < 12) return;
 
   await sendAlert(`⏳ *[${dexName}] Havuz Yakalandı, Likidite Bekleniyor...*\n🪙 Hedef: \`${symbol}\``);
 
@@ -98,23 +90,22 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
           if (confirmedLiquidity >= MIN_LIQUIDITY_USD) break;
         }
       } else {
-        // DeDust için likidite kontrol simülasyonu/doğrulaması
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
         if (Array.isArray(dedustData)) {
           const found = dedustData.find(p => p.address === poolAddress);
           if (found) {
-            confirmedLiquidity = Number(found.reservesUsd || found.lp_total_supply_usd || 51); // DeDust havuz verisi eşleşmesi
+            confirmedLiquidity = Number(found.reservesUsd || found.lp_total_supply_usd || 0);
             if (confirmedLiquidity >= MIN_LIQUIDITY_USD) break;
           }
         }
       }
     } catch (e) {
-      console.error("Likidite kontrol denemesi hatası:", e.message);
+      console.error("Likidite kontrol hatası:", e.message);
     }
   }
 
   if (confirmedLiquidity < MIN_LIQUIDITY_USD) {
-    await sendAlert(`⚠️ *[${dexName}] Alım İptal Edildi:* ${symbol} havuzu ${MIN_LIQUIDITY_USD}$ likidite sınırına ulaşamadı.`);
+    await sendAlert(`⚠️ *[${dexName}] Alım İptal Edildi:* ${symbol} havuzu ${MIN_LIQUIDITY_USD}$ likidite sınırına ulaşamadı (Güncel: $${confirmedLiquidity.toFixed(2)}).`);
     return;
   }
 
@@ -145,73 +136,103 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
   }
 }
 
-// STON.fi ve DeDust Taramasını Birleştiren Ana Fonksiyon
 async function checkAllPools() {
   try {
     // 1. STON.fi Taraması
-    const [stonPoolsData, stonAssetsData] = await Promise.all([
-      httpGet('https://api.ston.fi/v1/pools'),
-      httpGet('https://api.ston.fi/v1/assets')
-    ]);
-    
-    const stonPools = stonPoolsData.pool_list || [];
-    const stonAssets = stonAssetsData.asset_list || [];
-    const stonAssetMap = {};
-    for (const asset of stonAssets) {
-      stonAssetMap[asset.contract_address] = asset.symbol || 'Bilinmiyor';
-    }
-
-    for (const pool of stonPools) {
-      const poolAddress = pool.address;
-      if (isFirstRun) {
-        knownPools.add(poolAddress);
-        continue;
+    try {
+      const [stonPoolsData, stonAssetsData] = await Promise.all([
+        httpGet('https://api.ston.fi/v1/pools'),
+        httpGet('https://api.ston.fi/v1/assets')
+      ]);
+      
+      const stonPools = stonPoolsData.pool_list || [];
+      const stonAssets = stonAssetsData.asset_list || [];
+      const stonAssetMap = {};
+      for (const asset of stonAssets) {
+        stonAssetMap[asset.contract_address] = asset.symbol || 'Bilinmiyor';
       }
-      if (!knownPools.has(poolAddress)) {
-        knownPools.add(poolAddress);
-        const token0Addr = pool.token0_address;
-        const token1Addr = pool.token1_address;
-        const symbol0 = stonAssetMap[token0Addr] || token0Addr.slice(0, 6) + '...';
-        const symbol1 = stonAssetMap[token1Addr] || token1Addr.slice(0, 6) + '...';
 
-        const targetToken = symbol0 !== 'TON' ? token0Addr : token1Addr;
-        const targetSymbol = symbol0 !== 'TON' ? symbol0 : symbol1;
-        
-        executeSwapWithDelay(poolAddress, targetToken, targetSymbol, 'STON.fi', 'stonfi');
-      }
-    }
-
-    // 2. DeDust.io Taraması
-    const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
-    if (Array.isArray(dedustPools)) {
-      for (const pool of dedustPools) {
+      for (const pool of stonPools) {
         const poolAddress = pool.address;
+        if (!poolAddress) continue;
+
         if (isFirstRun) {
           knownPools.add(poolAddress);
           continue;
         }
+
         if (!knownPools.has(poolAddress)) {
           knownPools.add(poolAddress);
-          const symbol = pool.assets && pool.assets[1] && pool.assets[1].symbol ? pool.assets[1].symbol : 'DEDUST_COIN';
-          const tokenAddress = pool.assets && pool.assets[1] && pool.assets[1].address ? pool.assets[1].address : poolAddress;
+          const token0Addr = pool.token0_address;
+          const token1Addr = pool.token1_address;
+          const symbol0 = stonAssetMap[token0Addr] || (token0Addr ? token0Addr.slice(0, 6) + '...' : 'COIN');
+          const symbol1 = stonAssetMap[token1Addr] || (token1Addr ? token1Addr.slice(0, 6) + '...' : 'COIN');
 
-          executeSwapWithDelay(poolAddress, tokenAddress, symbol, 'DeDust.io', 'dedust');
+          const targetToken = symbol0 !== 'TON' ? token0Addr : token1Addr;
+          const targetSymbol = symbol0 !== 'TON' ? symbol0 : symbol1;
+          
+          executeSwapWithDelay(poolAddress, targetToken, targetSymbol, 'STON.fi', 'stonfi');
         }
       }
+    } catch (stonErr) {
+      console.error("STON.fi tarama hatası:", stonErr.message);
+    }
+
+    // 2. DeDust.io Taraması (Güvenli Blok)
+    try {
+      const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
+      if (Array.isArray(dedustPools)) {
+        for (const pool of dedustPools) {
+          const poolAddress = pool.address;
+          if (!poolAddress) continue;
+
+          if (isFirstRun) {
+            knownPools.add(poolAddress);
+            continue;
+          }
+
+          if (!knownPools.has(poolAddress)) {
+            knownPools.add(poolAddress);
+            let symbol = 'DEDUST_COIN';
+            let tokenAddress = poolAddress;
+
+            if (pool.assets && Array.isArray(pool.assets)) {
+              const targetAsset = pool.assets.find(a => a && a.symbol && a.symbol !== 'TON');
+              if (targetAsset) {
+                symbol = targetAsset.symbol;
+                tokenAddress = targetAsset.address || poolAddress;
+              }
+            }
+
+            executeSwapWithDelay(poolAddress, tokenAddress, symbol, 'DeDust.io', 'dedust');
+          }
+        }
+      }
+    } catch (dedustErr) {
+      console.error("DeDust tarama hatası:", dedustErr.message);
     }
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`Çift Borsalı Tarama Başlatıldı. Toplam bilinen havuz: ${knownPools.size}`);
-      await sendAlert(`✅ *Çift Borsalı (STON.fi + DeDust) Sniper Aktif!*`);
+      console.log(`Çift Borsalı Tarama Aktif. Toplam bilinen havuz: ${knownPools.size}`);
+      await sendAlert(`✅ *Çift Borsalı (STON.fi + DeDust) Sniper Aktif ve Stabil!*`);
     }
 
   } catch (error) {
-    console.error('Genel tarama hatası:', error.message);
+    console.error('Genel tarama döngü hatası:', error.message);
   }
 }
 
 initClient().then(() => {
-  setInterval(checkAllPools, 6000);
+  setInterval(checkAllPools, 8000);
   checkAllPools();
+});
+
+// Beklenmeyen çökmeleri engellemek için küresel güvenlik kalkanı
+process.on('uncaughtException', (err) => {
+  console.error('Beklenmeyen hata yakalandı (Çökme engellendi):', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('İşlenmeyen sözleşme hatası (Çökme engellendi):', reason);
 });
