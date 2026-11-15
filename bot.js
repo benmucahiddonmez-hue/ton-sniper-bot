@@ -50,12 +50,13 @@ async function initClient() {
   } catch (err) {}
 }
 
-// Cüzdandaki gerçek GRAM jeton bakiyesini sorgulayan fonksiyon
+// Güçlendirilmiş GRAM Bakiye Sorgulama (Alternatif endpoint taramalı)
 async function getGramBalance(walletAddress) {
   try {
     const gramMasterAddress = "EQC470UtbruUTvvKoqHE46aHk1nU5aJgOq3q3r_Xn3jK91Wl";
-    const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     
+    // Yöntem 1: getAccountJettons
+    const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     const data = await httpGet(url);
     if (data && data.ok && Array.isArray(data.result)) {
       const gramAsset = data.result.find(j => 
@@ -64,6 +65,15 @@ async function getGramBalance(walletAddress) {
       );
       if (gramAsset && gramAsset.balance) {
         return Number(gramAsset.balance) / 1e9;
+      }
+    }
+
+    // Yöntem 2: Alternatif Toncenter v3/v2 jettonwallets endpoint kontrolü
+    const altUrl = `https://toncenter.com/api/v2/getJettonWallets?owner_address=${walletAddress}&jetton_address=${gramMasterAddress}`;
+    const altData = await httpGet(altUrl);
+    if (altData && altData.ok && altData.result) {
+      if (altData.result.balance) {
+        return Number(altData.result.balance) / 1e9;
       }
     }
   } catch (e) {}
@@ -93,7 +103,7 @@ bot.on('message', async (msg) => {
 
       const balanceGram = await getGramBalance(walletAddress);
       
-      await bot.sendMessage(chatId, `💰 *Gerçek Cüzdan Bakiyesi*\n- **Adres:** \`${walletAddress}\`\n- **GRAM Miktarı:** \`${balanceGram.toFixed(2)} GRAM\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **GRAM Miktarı:** \`${balanceGram.toFixed(2)} GRAM\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
     } catch (err) {
       await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
     }
@@ -144,20 +154,16 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`İlk tarama tamamlandı. STON: ${stonCount}, DeDust: ${dedustCount}`);
       await sendAlert(`✅ *Sniper Bot Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
-  } catch (error) {
-    console.log("Tarama hatası:", error.message);
-  }
+  } catch (error) {}
 }
 
 initClient().then(() => {
-  console.log("Bot başlatılıyor...");
   setInterval(checkAllPools, 15000);
   checkAllPools();
 });
 
-process.on('uncaughtException', (err) => console.log('Hata yakalandı:', err));
-process.on('unhandledRejection', (err) => console.log('Reddedilme:', err));
+process.on('uncaughtException', () => {});
+process.on('unhandledRejection', () => {});
