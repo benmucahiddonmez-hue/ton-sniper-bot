@@ -77,7 +77,7 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
   await sendAlert(`⏳ *[${dexName}] Havuz Yakalandı, Likidite Bekleniyor...*\n🪙 Hedef: \`${symbol}\``);
 
   let confirmedLiquidity = 0;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     try {
       if (checkType === 'stonfi') {
@@ -99,8 +99,10 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
     } catch (e) {}
   }
 
+  // Likidite yetersizse bilgilendirip havuzu serbest bırakıyoruz (sonradan artarsa tekrar denesin diye)
   if (confirmedLiquidity < MIN_LIQUIDITY_USD) {
-    await sendAlert(`⚠️ *[${dexName}] Alım İptal Edildi:* ${symbol} havuzu ${MIN_LIQUIDITY_USD}$ likiditeye ulaşamadı ($${confirmedLiquidity.toFixed(2)}).`);
+    await sendAlert(`⚠️ *[${dexName}] Likidite Yetersiz / Durduruldu*:\n🪙 ${symbol} havuzu $${MIN_LIQUIDITY_USD} sınırına ulaşamadı (Güncel: \`$${confirmedLiquidity.toFixed(2)}\`).\n🔄 *Durum:* Beklemeye alındı, likidite artarsa tekrar taranacak.`);
+    knownPools.delete(poolAddress);
     return;
   }
 
@@ -118,7 +120,7 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
       return;
     }
 
-    await sendAlert(`🚀 *[${dexName}] Likidite Onaylandı, Alım Gönderiliyor!*\n🪙 Hedef: \`${symbol}\``);
+    await sendAlert(`🚀 *[${dexName}] Likidite Onaylandı ($${confirmedLiquidity.toFixed(2)}), Alım Gönderiliyor!*\n🪙 Hedef: \`${symbol}\``);
     
     const initialData = await httpGet(`https://api.ston.fi/v1/assets/${tokenAddress}`);
     const basePriceUsd = initialData && initialData.asset && initialData.asset.dex_price_usd ? Number(initialData.asset.dex_price_usd) : 0.0001;
@@ -179,7 +181,7 @@ async function checkAllPools() {
     if (isFirstRun) {
       isFirstRun = false;
       console.log(`İlk tarama tamamlandı. Bilinen havuz sayısı: ${knownPools.size}`);
-      await sendAlert(`✅ *Sniper Bot Temiz Modda Aktif!*`);
+      await sendAlert(`✅ *Sniper Bot Raporlama Modunda Aktif!* Tüm aşamalar bildirilecek.`);
     }
 
   } catch (error) {}
