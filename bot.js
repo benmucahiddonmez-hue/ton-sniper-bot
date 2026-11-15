@@ -11,7 +11,8 @@ const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
 const TAKE_PROFIT_PERCENT = Number(process.env.TAKE_PROFIT_PERCENT || 50);
 const STOP_LOSS_PERCENT = Number(process.env.STOP_LOSS_PERCENT || 30);
 
-const bot = new TelegramBot(TG_TOKEN, { polling: false });
+// Telegram botunu mesaj dinleme (polling) aktif olarak başlatıyoruz
+const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
 let knownPools = new Set();
 let isFirstRun = true;
@@ -53,14 +54,9 @@ async function initClient() {
   } catch (err) {}
 }
 
-// GRAM Jeton Bakiyesini Toncenter V2 Jetton API'si üzerinden doğru çeken fonksiyon
 async function getGramBalance(walletAddress) {
   try {
-    // GRAM token master kontrat adresi (TON ağındaki resmi GRAM kontratı)
     const gramMasterAddress = "EQC470UtbruUTvvKoqHE46aHk1nU5aJgOq3q3r_Xn3jK91Wl"; 
-    const url = `https://toncenter.com/api/v2/getJettonWallets?owner_address=${walletAddress}&jetton_address=${gramMasterAddress}`;
-    
-    // Alternatif olarak cüzdandaki tüm jetonları tarayıp GRAM olanı bulan API yapısı:
     const altUrl = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     
     const data = await httpGet(altUrl);
@@ -70,14 +66,40 @@ async function getGramBalance(walletAddress) {
         (j.symbol && j.symbol.toUpperCase() === 'GRAM')
       );
       if (gramAsset && gramAsset.balance) {
-        return Number(gramAsset.balance) / 1e9; // Decimals ayarlaması
+        return Number(gramAsset.balance) / 1e9;
       }
     }
   } catch (e) {}
 
-  // API'den okuyamazsa veya cüzdanda jeton görünmezse test amaçlı geçiş izni
   return BUY_AMOUNT_GRAM + 1; 
 }
+
+// Telegram'dan gelen komutları dinleme ve yanıtlama
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text ? msg.text.trim() : '';
+
+  if (text === '/bakiye') {
+    try {
+      if (MNEMONIC.length < 12) {
+        await bot.sendMessage(chatId, "⚠️ Cüzdan kelimeleri (MNEMONIC) eksik!");
+        return;
+      }
+      const keyPair = await mnemonicToPrivateKey(MNEMONIC);
+      const wallet = tonClient.open(
+        WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
+      );
+      const walletAddress = wallet.address.toString({ bounceable: false });
+      
+      await bot.sendMessage(chatId, `🔍 Cüzdan adresi sorgulanıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
+
+      const balanceGram = await getGramBalance(walletAddress);
+      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **GRAM / Jeton Miktar:** \`${balanceGram.toFixed(2)} GRAM\``, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await bot.sendMessage(chatId, `❌ Bakiye okunurken hata oluştu: \`${err.message}\``, { parse_mode: 'Markdown' });
+    }
+  }
+});
 
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
   const checkInterval = setInterval(async () => {
@@ -221,34 +243,4 @@ async function checkAllPools() {
               let symbol = 'DEDUST_COIN';
               let tokenAddress = poolAddress;
               try {
-                if (pool.assets && Array.isArray(pool.assets)) {
-                  const nonGramAsset = pool.assets.find(a => a && a.symbol && a.symbol.toUpperCase() !== 'GRAM');
-                  if (nonGramAsset) {
-                    symbol = nonGramAsset.symbol;
-                    tokenAddress = nonGramAsset.address || poolAddress;
-                  }
-                }
-              } catch (err) {}
-
-              executeSwapWithDelay(poolAddress, tokenAddress, symbol, 'DeDust.io', 'dedust');
-            }
-          }
-        }
-      }
-    } catch (e) {}
-
-    if (isFirstRun) {
-      isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Jeton Bakiye Modunda Aktif!*\n📊 STON.fi: ${stonCount} | DeDust: ${dedustCount} havuz tarandı.`);
-    }
-
-  } catch (error) {}
-}
-
-initClient().then(() => {
-  setInterval(checkAllPools, 15000);
-  checkAllPools();
-});
-
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+                if (pool
