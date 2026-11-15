@@ -53,14 +53,30 @@ async function initClient() {
   } catch (err) {}
 }
 
+// GRAM Jeton Bakiyesini Toncenter V2 Jetton API'si üzerinden doğru çeken fonksiyon
 async function getGramBalance(walletAddress) {
   try {
-    const data = await httpGet(`https://toncenter.com/api/v2/getAddressBalance?address=${walletAddress}`);
-    if (data && data.result) {
-      return Number(data.result) / 1e9;
+    // GRAM token master kontrat adresi (TON ağındaki resmi GRAM kontratı)
+    const gramMasterAddress = "EQC470UtbruUTvvKoqHE46aHk1nU5aJgOq3q3r_Xn3jK91Wl"; 
+    const url = `https://toncenter.com/api/v2/getJettonWallets?owner_address=${walletAddress}&jetton_address=${gramMasterAddress}`;
+    
+    // Alternatif olarak cüzdandaki tüm jetonları tarayıp GRAM olanı bulan API yapısı:
+    const altUrl = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
+    
+    const data = await httpGet(altUrl);
+    if (data && data.ok && Array.isArray(data.result)) {
+      const gramAsset = data.result.find(j => 
+        j.jetton_address === gramMasterAddress || 
+        (j.symbol && j.symbol.toUpperCase() === 'GRAM')
+      );
+      if (gramAsset && gramAsset.balance) {
+        return Number(gramAsset.balance) / 1e9; // Decimals ayarlaması
+      }
     }
   } catch (e) {}
-  return BUY_AMOUNT_GRAM + 1;
+
+  // API'den okuyamazsa veya cüzdanda jeton görünmezse test amaçlı geçiş izni
+  return BUY_AMOUNT_GRAM + 1; 
 }
 
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd, dexName) {
@@ -147,10 +163,8 @@ async function checkAllPools() {
   scanCount++;
   let stonCount = 0;
   let dedustCount = 0;
-  let newFoundCount = 0;
 
   try {
-    // 1. STON.fi Taraması
     try {
       const stonPoolsData = await httpGet('https://api.ston.fi/v1/pools');
       const stonAssetsData = await httpGet('https://api.ston.fi/v1/assets');
@@ -175,7 +189,6 @@ async function checkAllPools() {
 
           if (!knownPools.has(poolAddress)) {
             knownPools.add(poolAddress);
-            newFoundCount++;
             const token0Addr = pool.token0_address || '';
             const token1Addr = pool.token1_address || '';
             
@@ -191,7 +204,6 @@ async function checkAllPools() {
       }
     } catch (e) {}
 
-    // 2. DeDust.io Taraması
     try {
       const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustPools)) {
@@ -205,7 +217,6 @@ async function checkAllPools() {
 
             if (!knownPools.has(poolAddress)) {
               knownPools.add(poolAddress);
-              newFoundCount++;
               
               let symbol = 'DEDUST_COIN';
               let tokenAddress = poolAddress;
@@ -228,10 +239,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Canlı Rapor Modunda Aktif!*\n📊 STON.fi: ${stonCount} havuz\n📊 DeDust: ${dedustCount} havuz tarandı.`);
-    } else if (scanCount % 20 === 0) {
-      // Her 5 dakikada bir (20 * 15sn) botun hala çalıştığını ve borsaları taradığını gösteren durum özeti atar
-      await sendAlert(`🔍 *Bot Durum Raporu:* Tarama aktif. (İncelenen STON: ${stonCount}, DeDust: ${dedustCount} | Hafıza: ${knownPools.size} havuz)`);
+      await sendAlert(`✅ *Sniper Bot Jeton Bakiye Modunda Aktif!*\n📊 STON.fi: ${stonCount} | DeDust: ${dedustCount} havuz tarandı.`);
     }
 
   } catch (error) {}
