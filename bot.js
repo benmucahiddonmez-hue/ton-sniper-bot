@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4 } = require('@ton/ton');
+const { TonClient, WalletContractV4, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -17,7 +17,6 @@ let knownPools = new Set();
 let isFirstRun = true;
 let tonClient = null;
 
-// Güvenli HTTP GET isteği fonksiyonu (çökmeleri önler)
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -53,6 +52,7 @@ async function initClient() {
   }
 }
 
+// Kar Al / Zarar Durdur (TP/SL) Takibi
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd) {
   console.log(`${symbol} için fiyat takibi başlatıldı...`);
   
@@ -68,7 +68,7 @@ async function monitorAndSell(tokenAddress, symbol, buyPriceUsd) {
 
       if (priceChangePercent >= TAKE_PROFIT_PERCENT || priceChangePercent <= -STOP_LOSS_PERCENT) {
         clearInterval(checkInterval);
-        const reason = priceChangePercent >= TAKE_PROFIT_PERCENT ? '🎯 HEDEF KAR' : '🛑 ZARAR DURDUR';
+        const reason = priceChangePercent >= TAKE_PROFIT_PERCENT ? '🎯 HEDEF KAR (Take Profit)' : '🛑 ZARAR DURDUR (Stop Loss)';
         await sendAlert(`${reason} tetiklendi!\n🪙 *Token:* \`${symbol}\`\n📊 *Oran:* \`%${priceChangePercent.toFixed(2)}\``);
       }
     } catch (err) {
@@ -77,9 +77,34 @@ async function monitorAndSell(tokenAddress, symbol, buyPriceUsd) {
   }, 10000);
 }
 
-async function executeSwap(tokenAddress, symbol) {
+// Gerçek Alım (Swap) Fonksiyonu ve Likidite Bekleme Mekanizması
+async function executeSwapWithDelay(poolAddress, tokenAddress, symbol) {
   if (MNEMONIC.length < 12) {
     console.log("Cüzdan mnemonic eksik.");
+    return;
+  }
+
+  await sendAlert(`⏳ *Havuz Yakalandı, Likidite Bekleniyor...*\n🪙 Hedef: \`${symbol}\``);
+
+  // Havuzun likidite doldurması için 10 saniye boyunca her 2 saniyede bir kontrol et
+  let confirmedLiquidity = 0;
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const poolData = await httpGet(`https://api.ston.fi/v1/pools/${poolAddress}`);
+      if (poolData && poolData.pool) {
+        confirmedLiquidity = Number(poolData.pool.lp_total_supply_usd || 0);
+        if (confirmedLiquidity >= MIN_LIQUIDITY_USD) {
+          break; // Yeterli likidite sağlandı, döngüden çık
+        }
+      }
+    } catch (e) {
+      console.error("Likidite kontrol denemesi hatası:", e.message);
+    }
+  }
+
+  if (confirmedLiquidity < MIN_LIQUIDITY_USD) {
+    await sendAlert(`⚠️ *Alım İptal Edildi:* ${symbol} havuzu ${MIN_LIQUIDITY_USD}$ likidite sınırına ulaşamadı (Güncel: $${confirmedLiquidity.toFixed(2)}).`);
     return;
   }
 
@@ -94,12 +119,13 @@ async function executeSwap(tokenAddress, symbol) {
     console.log(`Cüzdan bakiyesi: ${balanceTon} TON`);
 
     if (balanceTon < (BUY_AMOUNT_TON + 0.05)) {
-      await sendAlert(`⚠️ *Alım Atlandı:* Bakiye yetersiz (${balanceTon.toFixed(2)} TON).`);
+      await sendAlert(`⚠️ *Otomatik Alım Atlandı:* Bakiye yetersiz (${balanceTon.toFixed(2)} TON).`);
       return;
     }
 
-    await sendAlert(`🚀 *Otomatik Alım Başlatıldı!*\n🪙 Hedef: \`${symbol}\`\n💰 Miktar: \`${BUY_AMOUNT_TON} TON\``);
+    await sendAlert(`🚀 *Likidite Onaylandı, Alım Gönderiliyor!*\n🪙 Hedef: \`${symbol}\`\n💧 Likidite: $\`${confirmedLiquidity.toFixed(2)}\`\n💰 Miktar: \`${BUY_AMOUNT_TON} TON\``);
     
+    // Alım yapıldıktan sonra baz fiyatı alıp takip başlat
     const initialData = await httpGet(`https://api.ston.fi/v1/assets/${tokenAddress}`);
     const basePriceUsd = initialData && initialData.asset && initialData.asset.dex_price_usd ? Number(initialData.asset.dex_price_usd) : 0.0001;
 
@@ -143,27 +169,20 @@ async function checkStonFiPools() {
         const symbol0 = assetMap[token0Addr] || token0Addr.slice(0, 6) + '...';
         const symbol1 = assetMap[token1Addr] || token1Addr.slice(0, 6) + '...';
         const liquidityUsd = Number(pool.lp_total_supply_usd || 0);
-        
-        if (liquidityUsd < MIN_LIQUIDITY_USD) {
-          continue;
-        }
 
-        const stonfiLink = `https://app.ston.fi/swap?chart=to&ft=${token0Addr}&tt=${token1Addr}`;
-        const alertMsg = `🚨 *YENİ COİN!* 🪙 \`${symbol0} / ${symbol1}\`\n💧 *Likidite:* $\`${liquidityUsd.toFixed(2)}\`\n🔗 [Aç](${stonfiLink})`;
-        
-        await sendAlert(alertMsg);
-
+        // İlk anda 0 olsa bile havuzu takibe alıp bekleme mekanizmasına sokuyoruz
         const targetToken = symbol0 !== 'TON' ? token0Addr : token1Addr;
         const targetSymbol = symbol0 !== 'TON' ? symbol0 : symbol1;
         
-        await executeSwap(targetToken, targetSymbol);
+        // Havuz yakalandı, bekleme ve alım fonksiyonunu tetikle
+        executeSwapWithDelay(poolAddress, targetToken, targetSymbol);
       }
     }
 
     if (isFirstRun) {
       isFirstRun = false;
       console.log(`Başlangıç tamamlandı. ${knownPools.size} havuz yüklendi.`);
-      await sendAlert(`✅ *Bot Stabil Sürüme Geçti ve Aktif!*`);
+      await sendAlert(`✅ *Akıllı Likidite Takipçisi Aktif!* Yeni havuzlar bekleniyor.`);
     }
 
   } catch (error) {
