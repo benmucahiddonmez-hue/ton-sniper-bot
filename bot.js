@@ -1,15 +1,18 @@
 const TelegramBot = require('node-telegram-bot-api');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
+const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
+const MNEMONIC = process.env.WALLET_MNEMONIC ? process.env.WALLET_MNEMONIC.split(' ') : [];
 const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
 
-// Telegram botunu polling (mesaj dinleme) aktif olarak başlatıyoruz
 const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
 let knownPools = new Set();
 let isFirstRun = true;
+let tonClient = null;
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {
@@ -38,7 +41,36 @@ async function sendAlert(message) {
   } catch (err) {}
 }
 
-// Telegram'dan gelen /bakiye komutunu yakalayan güvenli dinleyici
+async function initClient() {
+  try {
+    tonClient = new TonClient({
+      endpoint: 'https://toncenter.com/api/v2/jsonRPC'
+    });
+    console.log("TON istemcisi başlatıldı.");
+  } catch (err) {}
+}
+
+// Cüzdandaki gerçek GRAM jeton bakiyesini sorgulayan fonksiyon
+async function getGramBalance(walletAddress) {
+  try {
+    const gramMasterAddress = "EQC470UtbruUTvvKoqHE46aHk1nU5aJgOq3q3r_Xn3jK91Wl";
+    const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
+    
+    const data = await httpGet(url);
+    if (data && data.ok && Array.isArray(data.result)) {
+      const gramAsset = data.result.find(j => 
+        j.jetton_address === gramMasterAddress || 
+        (j.symbol && j.symbol.toUpperCase() === 'GRAM')
+      );
+      if (gramAsset && gramAsset.balance) {
+        return Number(gramAsset.balance) / 1e9;
+      }
+    }
+  } catch (e) {}
+  return 0;
+}
+
+// Telegram /bakiye komutu dinleyicisi
 bot.on('message', async (msg) => {
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
@@ -46,8 +78,25 @@ bot.on('message', async (msg) => {
 
   if (text === '/bakiye') {
     try {
-      await bot.sendMessage(chatId, `💰 *Cüzdan Durumu:* Bot aktif ve çalışıyor.\n- **İşlem Miktarı:** \`${BUY_AMOUNT_GRAM} GRAM\`\n- **İzlenen Havuz Sayısı:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
-    } catch (err) {}
+      if (MNEMONIC.length < 12) {
+        await bot.sendMessage(chatId, "⚠️ Cüzdan kelimeleri (WALLET_MNEMONIC) eksik veya hatalı!");
+        return;
+      }
+
+      const keyPair = await mnemonicToPrivateKey(MNEMONIC);
+      const wallet = tonClient.open(
+        WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
+      );
+      const walletAddress = wallet.address.toString({ bounceable: false });
+
+      await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
+
+      const balanceGram = await getGramBalance(walletAddress);
+      
+      await bot.sendMessage(chatId, `💰 *Gerçek Cüzdan Bakiyesi*\n- **Adres:** \`${walletAddress}\`\n- **GRAM Miktarı:** \`${balanceGram.toFixed(2)} GRAM\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
+    }
   }
 });
 
@@ -56,7 +105,6 @@ async function checkAllPools() {
     let stonCount = 0;
     let dedustCount = 0;
 
-    // 1. STON.fi Taraması
     try {
       const stonData = await httpGet('https://api.ston.fi/v1/pools');
       const pools = stonData && (stonData.pool_list || stonData.pools || stonData);
@@ -76,7 +124,6 @@ async function checkAllPools() {
       }
     } catch (e) {}
 
-    // 2. DeDust.io Taraması
     try {
       const dedustData = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustData)) {
@@ -98,7 +145,7 @@ async function checkAllPools() {
     if (isFirstRun) {
       isFirstRun = false;
       console.log(`İlk tarama tamamlandı. STON: ${stonCount}, DeDust: ${dedustCount}`);
-      await sendAlert(`✅ *Sniper Bot Kararlı Modda Başlatıldı!*\n📊 STON: ${stonCount} | DeDust: ${dedustCount} havuz tarandı.`);
+      await sendAlert(`✅ *Sniper Bot Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {
@@ -106,9 +153,11 @@ async function checkAllPools() {
   }
 }
 
-console.log("Bot başlatılıyor...");
-setInterval(checkAllPools, 15000);
-checkAllPools();
+initClient().then(() => {
+  console.log("Bot başlatılıyor...");
+  setInterval(checkAllPools, 15000);
+  checkAllPools();
+});
 
 process.on('uncaughtException', (err) => console.log('Hata yakalandı:', err));
 process.on('unhandledRejection', (err) => console.log('Reddedilme:', err));
