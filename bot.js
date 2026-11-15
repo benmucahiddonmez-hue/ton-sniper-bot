@@ -23,51 +23,64 @@ async function sendAlert(message) {
 
 async function checkStonFiPools() {
   try {
-    const response = await fetch('https://api.ston.fi/v1/pools');
-    const data = await response.json();
-    const pools = data.pool_list || [];
+    // 1. Havuzları ve varlıkları (assets) aynı anda çekiyoruz
+    const [poolsRes, assetsRes] = await Promise.all([
+      fetch('https://api.ston.fi/v1/pools'),
+      fetch('https://api.ston.fi/v1/assets')
+    ]);
+
+    const poolsData = await poolsRes.json();
+    const assetsData = await assetsRes.json();
+    
+    const pools = poolsData.pool_list || [];
+    const assets = assetsData.asset_list || [];
+
+    // Token adresinden sembolü bulmak için sözlük (map) oluşturuyoruz
+    const assetMap = {};
+    for (const asset of assets) {
+      assetMap[asset.contract_address] = asset.symbol || 'Bilinmiyor';
+    }
 
     for (const pool of pools) {
       const poolAddress = pool.address;
 
-      // İlk çalıştırmada mevcut havuzları hafızaya al
       if (isFirstRun) {
         knownPools.add(poolAddress);
         continue;
       }
 
-      // Yeni havuz yakalandığında:
       if (!knownPools.has(poolAddress)) {
         knownPools.add(poolAddress);
         
-        // Token adresleri ve likidite bilgileri
-        const token0 = pool.token0_address;
-        const token1 = pool.token1_address;
+        const token0Addr = pool.token0_address;
+        const token1Addr = pool.token1_address;
+        
+        // Adreslere karşılık gelen token isimlerini (sembollerini) alıyoruz
+        const symbol0 = assetMap[token0Addr] || token0Addr.slice(0, 6) + '...';
+        const symbol1 = assetMap[token1Addr] || token1Addr.slice(0, 6) + '...';
+        
         const liquidityUsd = Number(pool.lp_total_supply_usd || 0).toFixed(2);
-        
-        // STON.fi doğrudan alım/inceleme linki
-        const stonfiLink = `https://app.ston.fi/swap?chart=to&ft=${token0}&tt=${token1}`;
+        const stonfiLink = `https://app.ston.fi/swap?chart=to&ft=${token0Addr}&tt=${token1Addr}`;
 
-        const alertMsg = `🚨 *YENİ COİN / HAVUZ YAKALANDI!* 🚨\n\n` +
-                         `🪙 *Token 0:* \`${token0}\`\n` +
-                         `🪙 *Token 1:* \`${token1}\`\n` +
+        const alertMsg = `🚨 *YENİ HAVUZ / COİN YAKALANDI!* 🚨\n\n` +
+                         `🪙 *Parite:* \`${symbol0} / ${symbol1}\`\n` +
                          `💧 *Likidite:* $${liquidityUsd}\n` +
-                         `📍 *Havuz Adresi:* \`${poolAddress}\`\n\n` +
-                         `🔗 [STON.fi'de İncele & Al](${stonfiLink})`;
+                         `📍 *Havuz:* \`${poolAddress.slice(0, 10)}...\`\n\n` +
+                         `🔗 [STON.fi'de Aç & İncele](${stonfiLink})`;
         
-        console.log('Yeni havuz bulundu ve detaylar gönderiliyor:', poolAddress);
+        console.log(`Yeni havuz bulundu: ${symbol0}/${symbol1}`);
         await sendAlert(alertMsg);
       }
     }
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`Başlangıç tamamlandı. ${knownPools.size} mevcut havuz hafızaya alındı.`);
-      await sendAlert(`✅ *Bot Güncellendi ve Tarıyor!* ${knownPools.size} havuz takipte. Yeni coin çıktığında detaylarıyla bildirim alacaksınız.`);
+      console.log(`Başlangıç tamamlandı. ${knownPools.size} havuz yüklendi.`);
+      await sendAlert(`✅ *Bot Güncellendi!* Token isimleri (sembolleri) aktif edildi. ${knownPools.size} havuz takipte.`);
     }
 
   } catch (error) {
-    console.error('Havuz tarama hatası:', error.message);
+    console.error('Tarama hatası:', error.message);
   }
 }
 
