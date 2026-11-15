@@ -14,7 +14,7 @@ let isFirstRun = true;
 
 async function sendAlert(message) {
   try {
-    await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown' });
+    await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
     console.log("Telegram bildirimi gönderildi.");
   } catch (err) {
     console.error('Telegram mesaj hatası:', err.message);
@@ -30,31 +30,40 @@ async function checkStonFiPools() {
     for (const pool of pools) {
       const poolAddress = pool.address;
 
-      // İlk çalıştırmada mevcut havuzları hafızaya alıyoruz (eski coinler alarm üretmesin diye)
+      // İlk çalıştırmada mevcut havuzları hafızaya al
       if (isFirstRun) {
         knownPools.add(poolAddress);
         continue;
       }
 
-      // Eğer listede olmayan yepyeni bir havuz çıkarsa:
+      // Yeni havuz yakalandığında:
       if (!knownPools.has(poolAddress)) {
         knownPools.add(poolAddress);
         
-        const alertMsg = `🚨 *YENİ HAVUZ YAKALANDI (STON.fi)*\n\n` +
-                         `📍 *Havuz Adresi:* \`${poolAddress}\`\n` +
-                         `🪙 *Token 0:* \`${pool.token0_address}\`\n` +
-                         `🪙 *Token 1:* \`${pool.token1_address}\`\n` +
-                         `💧 *Likidite (USD):* $${Number(pool.lp_total_supply_usd || 0).toFixed(2)}`;
+        // Token adresleri ve likidite bilgileri
+        const token0 = pool.token0_address;
+        const token1 = pool.token1_address;
+        const liquidityUsd = Number(pool.lp_total_supply_usd || 0).toFixed(2);
         
-        console.log('Yeni havuz bulundu ve bildiriliyor:', poolAddress);
+        // STON.fi doğrudan alım/inceleme linki
+        const stonfiLink = `https://app.ston.fi/swap?chart=to&ft=${token0}&tt=${token1}`;
+
+        const alertMsg = `🚨 *YENİ COİN / HAVUZ YAKALANDI!* 🚨\n\n` +
+                         `🪙 *Token 0:* \`${token0}\`\n` +
+                         `🪙 *Token 1:* \`${token1}\`\n` +
+                         `💧 *Likidite:* $${liquidityUsd}\n` +
+                         `📍 *Havuz Adresi:* \`${poolAddress}\`\n\n` +
+                         `🔗 [STON.fi'de İncele & Al](${stonfiLink})`;
+        
+        console.log('Yeni havuz bulundu ve detaylar gönderiliyor:', poolAddress);
         await sendAlert(alertMsg);
       }
     }
 
     if (isFirstRun) {
       isFirstRun = false;
-      console.log(`Başlangıç tamamlandı. ${knownPools.size} mevcut havuz hafızaya alındı. Yeni listelemeler bekleniyor...`);
-      await sendAlert(`✅ *Bot Aktif ve Tarıyor!* ${knownPools.size} mevcut havuz tarandı. Yeni coin bekleniyor...`);
+      console.log(`Başlangıç tamamlandı. ${knownPools.size} mevcut havuz hafızaya alındı.`);
+      await sendAlert(`✅ *Bot Güncellendi ve Tarıyor!* ${knownPools.size} havuz takipte. Yeni coin çıktığında detaylarıyla bildirim alacaksınız.`);
     }
 
   } catch (error) {
