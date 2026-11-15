@@ -1,11 +1,12 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
-const https = require('https');
+https = require('https');
 
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
-const MNEMONIC = process.env.WALLET_MNEMONIC ? process.env.WALLET_MNEMONIC.split(' ') : [];
+// 12 kelimenizi boşluklarla buraya yazabilirsiniz veya Railway'e WALLET_MNEMONIC olarak ekleyebilirsiniz
+const MNEMONIC_PHRASE = process.env.WALLET_MNEMONIC || "wet sunny glow owner cactus ugly toilet web always person citizen copy";
 const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
 
 const bot = new TelegramBot(TG_TOKEN, { polling: true });
@@ -50,14 +51,24 @@ async function initClient() {
   } catch (err) {}
 }
 
-// Cüzdandaki tüm jetonları tarayıp GRAM veya herhangi bir jeton bakiyesini esnek bulan fonksiyon
+// 12 kelimeden Tonkeeper uyumlu cüzdan nesnesini türeten fonksiyon
+async function getWalletInstance() {
+  const words = MNEMONIC_PHRASE.trim().split(/\s+/);
+  if (words.length < 12) throw new Error("Mnemonic kelimeleri eksik!");
+  
+  const keyPair = await mnemonicToPrivateKey(words);
+  // Tonkeeper standart v4 cüzdan kontratı
+  const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+  return tonClient.open(wallet);
+}
+
+// Cüzdandaki GRAM bakiyesini sorgulama
 async function getGramBalance(walletAddress) {
   try {
     const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     const data = await httpGet(url);
     
     if (data && data.ok && Array.isArray(data.result)) {
-      // Cüzdanda bulunan tüm jetonları tarar (isimde veya sembolde GRAM geçen ya da jeton balansına sahip olanlar)
       for (const j of data.result) {
         const symbol = j.symbol || (j.metadata && j.metadata.symbol) || '';
         const balance = j.balance ? Number(j.balance) / 1e9 : 0;
@@ -79,22 +90,14 @@ bot.on('message', async (msg) => {
 
   if (text === '/bakiye') {
     try {
-      if (MNEMONIC.length < 12) {
-        await bot.sendMessage(chatId, "⚠️ Cüzdan kelimeleri (WALLET_MNEMONIC) eksik veya hatalı!");
-        return;
-      }
-
-      const keyPair = await mnemonicToPrivateKey(MNEMONIC);
-      const wallet = tonClient.open(
-        WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
-      );
+      const wallet = await getWalletInstance();
       const walletAddress = wallet.address.toString({ bounceable: false });
 
       await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
 
       const assetInfo = await getGramBalance(walletAddress);
       
-      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.assetSymbol || 'GRAM'}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.symbol}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
     } catch (err) {
       await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
     }
@@ -145,7 +148,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Mnemonic Modunda Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
