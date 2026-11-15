@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -92,7 +92,7 @@ async function executeSwapWithDelay(poolAddress, tokenAddress, symbol, dexName, 
       } else {
         const dedustData = await httpGet(`https://api.dedust.io/v2/pools`);
         if (Array.isArray(dedustData)) {
-          const found = dedustData.find(p => p.address === poolAddress);
+          const found = dedustData.find(p => p && p.address === poolAddress);
           if (found) {
             confirmedLiquidity = Number(found.reservesUsd || found.lp_total_supply_usd || 0);
             if (confirmedLiquidity >= MIN_LIQUIDITY_USD) break;
@@ -140,21 +140,22 @@ async function checkAllPools() {
   try {
     // 1. STON.fi Taraması
     try {
-      const [stonPoolsData, stonAssetsData] = await Promise.all([
-        httpGet('https://api.ston.fi/v1/pools'),
-        httpGet('https://api.ston.fi/v1/assets')
-      ]);
+      const stonPoolsData = await httpGet('https://api.ston.fi/v1/pools');
+      const stonAssetsData = await httpGet('https://api.ston.fi/v1/assets');
       
-      const stonPools = stonPoolsData.pool_list || [];
-      const stonAssets = stonAssetsData.asset_list || [];
+      const stonPools = (stonPoolsData && stonPoolsData.pool_list) || [];
+      const stonAssets = (stonAssetsData && stonAssetsData.asset_list) || [];
       const stonAssetMap = {};
+      
       for (const asset of stonAssets) {
-        stonAssetMap[asset.contract_address] = asset.symbol || 'Bilinmiyor';
+        if (asset && asset.contract_address) {
+          stonAssetMap[asset.contract_address] = asset.symbol || 'Bilinmiyor';
+        }
       }
 
       for (const pool of stonPools) {
+        if (!pool || !pool.address) continue;
         const poolAddress = pool.address;
-        if (!poolAddress) continue;
 
         if (isFirstRun) {
           knownPools.add(poolAddress);
@@ -163,10 +164,10 @@ async function checkAllPools() {
 
         if (!knownPools.has(poolAddress)) {
           knownPools.add(poolAddress);
-          const token0Addr = pool.token0_address;
-          const token1Addr = pool.token1_address;
-          const symbol0 = stonAssetMap[token0Addr] || (token0Addr ? token0Addr.slice(0, 6) + '...' : 'COIN');
-          const symbol1 = stonAssetMap[token1Addr] || (token1Addr ? token1Addr.slice(0, 6) + '...' : 'COIN');
+          const token0Addr = pool.token0_address || '';
+          const token1Addr = pool.token1_address || '';
+          const symbol0 = stonAssetMap[token0Addr] || 'COIN';
+          const symbol1 = stonAssetMap[token1Addr] || 'COIN';
 
           const targetToken = symbol0 !== 'TON' ? token0Addr : token1Addr;
           const targetSymbol = symbol0 !== 'TON' ? symbol0 : symbol1;
@@ -178,13 +179,13 @@ async function checkAllPools() {
       console.error("STON.fi tarama hatası:", stonErr.message);
     }
 
-    // 2. DeDust.io Taraması (Güvenli Blok)
+    // 2. DeDust.io Taraması (Güvenli ve Hatasız Mod)
     try {
       const dedustPools = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustPools)) {
         for (const pool of dedustPools) {
+          if (!pool || !pool.address) continue;
           const poolAddress = pool.address;
-          if (!poolAddress) continue;
 
           if (isFirstRun) {
             knownPools.add(poolAddress);
@@ -193,15 +194,21 @@ async function checkAllPools() {
 
           if (!knownPools.has(poolAddress)) {
             knownPools.add(poolAddress);
+            
+            // DeDust sembol ayrıştırma güvenliği
             let symbol = 'DEDUST_COIN';
             let tokenAddress = poolAddress;
 
-            if (pool.assets && Array.isArray(pool.assets)) {
-              const targetAsset = pool.assets.find(a => a && a.symbol && a.symbol !== 'TON');
-              if (targetAsset) {
-                symbol = targetAsset.symbol;
-                tokenAddress = targetAsset.address || poolAddress;
+            try {
+              if (pool.assets && Array.isArray(pool.assets)) {
+                const nonTonAsset = pool.assets.find(a => a && a.symbol && a.symbol.toUpperCase() !== 'TON');
+                if (nonTonAsset) {
+                  symbol = nonTonAsset.symbol;
+                  tokenAddress = nonTonAsset.address || poolAddress;
+                }
               }
+            } catch (innerErr) {
+              // Varlık okuma hatası olursa varsayılan değerlerle devam et
             }
 
             executeSwapWithDelay(poolAddress, tokenAddress, symbol, 'DeDust.io', 'dedust');
@@ -224,15 +231,14 @@ async function checkAllPools() {
 }
 
 initClient().then(() => {
-  setInterval(checkAllPools, 8000);
+  setInterval(checkAllPools, 10000);
   checkAllPools();
 });
 
-// Beklenmeyen çökmeleri engellemek için küresel güvenlik kalkanı
 process.on('uncaughtException', (err) => {
-  console.error('Beklenmeyen hata yakalandı (Çökme engellendi):', err.message);
+  console.error('Kritik Hata Yakalandı (Çökme Engellendi):', err.message);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('İşlenmeyen sözleşme hatası (Çökme engellendi):', reason);
+process.on('unhandledRejection', (reason) => {
+  console.error('İşlenmeyen Sözleşme Hatası (Çökme Engellendi):', reason);
 });
