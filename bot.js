@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 
 const TG_TOKEN = process.env.TG_TOKEN;
@@ -35,9 +35,8 @@ async function initClient() {
   }
 }
 
-// Fiyat Takibi ve TP/SL (Kar Al / Zarar Durdur)
 async function monitorAndSell(tokenAddress, symbol, buyPriceUsd) {
-  console.log(`${symbol} için fiyat takibi (TP/SL) başlatıldı...`);
+  console.log(`${symbol} için fiyat takibi başlatıldı...`);
   
   const checkInterval = setInterval(async () => {
     try {
@@ -49,35 +48,4 @@ async function monitorAndSell(tokenAddress, symbol, buyPriceUsd) {
       }
 
       const currentPriceUsd = Number(data.asset.dex_price_usd);
-      const priceChangePercent = ((currentPriceUsd - buyPriceUsd) / buyPriceUsd) * 100;
-
-      console.log(`${symbol} Anlık Değişim: %${priceChangePercent.toFixed(2)}`);
-
-      if (priceChangePercent >= TAKE_PROFIT_PERCENT || priceChangePercent <= -STOP_LOSS_PERCENT) {
-        clearInterval(checkInterval);
-        
-        const reason = priceChangePercent >= TAKE_PROFIT_PERCENT ? '🎯 HEDEF KAR (Take Profit)' : '🛑 ZARAR DURDUR (Stop Loss)';
-        await sendAlert(`${reason} tetiklendi!\n🪙 *Token:* \`${symbol}\`\n📊 *Oran:* \`%${priceChangePercent.toFixed(2)}\`\nSatış simülasyonu tamamlandı.`);
-        
-        console.log(`${symbol} pozisyonu kapatıldı. Sebep: ${reason}`);
-      }
-    } catch (err) {
-      console.error(`Fiyat takip hatası (${symbol}):`, err.message);
-    }
-  }, 10000);
-}
-
-// Otomatik Alım Simülasyonu / Cüzdan Testi
-async function executeSwap(tokenAddress, symbol) {
-  if (MNEMONIC.length < 12) {
-    console.log("Cüzdan mnemonic eksik, alım atlanıyor.");
-    return;
-  }
-
-  try {
-    const keyPair = await mnemonicToPrivateKey(MNEMONIC);
-    const wallet = tonClient.open(
-      WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
-    );
-
-    const balance
+      const priceChangePercent = ((currentPriceUsd - buyPriceUsd) / buyPriceUsd) *
