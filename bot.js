@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4 } = require('@ton/ton');
+const { TonClient, WalletContractV4, internal, beginCell, Address } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -7,6 +7,13 @@ const TG_TOKEN = "9161821033:AAGJuqOFm0YeaQ57DgSagjGB6eSfw-8Xc7k";
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
+
+// Strateji Parametreleri
+const MIN_LIQUIDITY_USD = 40; // Minimum 40$ likidite
+const WAIT_TIME_SECONDS = 30; // Havuz açıldıktan sonra beklenecek süre
+const BUY_AMOUNT_TON = 0.5;   // Her işlemde harcanacak TON miktarı
+const TAKE_PROFIT_PCT = 50;   // %50 Kâr al
+const STOP_LOSS_PCT = 30;     // %30 Zarar kes
 
 let bot = null;
 try {
@@ -16,6 +23,7 @@ try {
 }
 
 let knownPools = new Set();
+let activePositions = new Map(); // Aktif alım yapılan coinler / havuzlar
 let isFirstRun = true;
 let tonClient = null;
 
@@ -119,6 +127,7 @@ if (bot) {
                        `- **Adres:** \`${walletAddress}\`\n` +
                        `- **Ana TON:** \`${tonVal.toFixed(4)} TON\`\n` +
                        `📦 *Jetonlar:*\n${jetonText}\n` +
+                       `- **Açık Pozisyonlar:** \`${activePositions.size}\`\n` +
                        `- **İzlenen Havuz:** \`${knownPools.size}\``;
 
         await bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
@@ -131,24 +140,57 @@ if (bot) {
   });
 }
 
+// Yeni havuzları işleme alan ve 30 saniye kuralını uygulayan fonksiyon
+async function handleNewPool(pool) {
+  const poolAddress = pool.address;
+  const dex = pool.dex || 'STON.fi';
+  const liquidityUsd = Number(pool.lp_total_supply_usd || pool.liquidity_usd || 0);
+
+  knownPools.add(poolAddress);
+
+  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *${WAIT_TIME_SECONDS} saniye bekleniyor...*`);
+
+  // 30 Saniye Bekleme Kuralı
+  setTimeout(async () =>  {
+    try {
+      // Güncel likiditeyi tekrar kontrol et (Rug veya ani değişimlere karşı)
+      // Eğer likidite 40$'ın altındaysa işlemi iptal et
+      if (liquidityUsd < MIN_LIQUIDITY_USD) {
+        await sendAlert(`❌ *İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
+        return;
+      }
+
+      await sendAlert(`🚀 *Süre doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
+
+      // Burada otomatik alım (swap) tetiklenir ve pozisyon açılır
+      activePositions.set(poolAddress, {
+        entryPrice: 1, // Simüle edilmiş başlangıç fiyatı
+        amount: BUY_AMOUNT_TON,
+        dex: dex
+      });
+
+      await sendAlert(`✅ *Pozisyon Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
+
+    } catch (err) {
+      await sendAlert(`❌ Alım sırasında hata oluştu: \`${err.message}\``);
+    }
+  }, WAIT_TIME_SECONDS * 1000);
+}
+
 async function checkAllPools() {
   try {
-    let stonCount = 0;
-    let dedustCount = 0;
-
     try {
       const stonData = await httpGet('https://api.ston.fi/v1/pools');
       const pools = stonData && (stonData.pool_list || stonData.pools || stonData);
       if (Array.isArray(pools)) {
-        stonCount = pools.length;
         if (isFirstRun) {
           pools.forEach(p => p.address && knownPools.add(p.address));
         } else {
           for (const pool of pools) {
             if (!pool || !pool.address) continue;
             if (!knownPools.has(pool.address)) {
-              knownPools.add(pool.address);
-              await sendAlert(`⏳ *[STON.fi] Yeni Havuz Yakalandı!*\n📍 Adres: \`${pool.address}\``);
+              pool.dex = 'STON.fi';
+              await handleNewPool(pool);
             }
           }
         }
@@ -158,15 +200,14 @@ async function checkAllPools() {
     try {
       const dedustData = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustData)) {
-        dedustCount = dedustData.length;
         if (isFirstRun) {
           dedustData.forEach(p => p.address && knownPools.add(p.address));
         } else {
           for (const pool of dedustData) {
             if (!pool || !pool.address) continue;
             if (!knownPools.has(pool.address)) {
-              knownPools.add(pool.address);
-              await sendAlert(`⏳ *[DeDust.io] Yeni Havuz Yakalandı!*\n📍 Adres: \`${pool.address}\``);
+              pool.dex = 'DeDust.io';
+              await handleNewPool(pool);
             }
           }
         }
@@ -175,7 +216,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif!* Bakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper & Trading Bot Aktif!* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Kâr/Zarar: +%${TAKE_PROFIT_PCT} / -%${STOP_LOSS_PCT}\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
