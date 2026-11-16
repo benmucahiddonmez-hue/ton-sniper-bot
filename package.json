@@ -1,13 +1,13 @@
 {
-  "name": "ton-pool-monitor-test",
+  "name": "ton-sniper-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "TON DEX pool monitor - test/alert only",
+  "description": "TON Gram Sniper Telegram Bot",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "python bot.py"
   },
-  "dependencies": {
-    "node-telegram-bot-api": "^0.66.0"
+  "dependencies": {},
+  "engines": {
+    "node": "20.x"
   }
 }
