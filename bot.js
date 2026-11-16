@@ -92,66 +92,6 @@ async function getFullBalanceInfo(wallet) {
         const symbol = j.symbol || (j.metadata && j.metadata.symbol) || 'JETON';
         const bal = j.balance ? Number(j.balance) / 1e9 : 0;
         if (bal > 0) {
-          jetonsList.push(`- ${bal.toFixed(4)} ${symbol}`);
-        }
-      }
-    }
-
-    return { ton: tonBalance, jetons: jetonsList };
-  } catch (e) {
-    return { ton: 0, jetons: [] };
-  }
-}
-
-async function executeSwap(pool, amountTon) {
-  try {
-    const wallet = await getWalletInstance();
-    const seqno = await wallet.getSeqno();
-    
-    const targetAddress = Address.parse(pool.address);
-
-    const forwardPayload = beginCell()
-      .storeUint(0, 32) 
-      .endCell();
-
-    await wallet.sendTransfer({
-      seqno,
-      secretKey: (await mnemonicToPrivateKey(MNEMONIC_PHRASE.trim().split(/\s+/))).secretKey,
-      messages: [
-        internal({
-          to: targetAddress,
-          value: toNano(amountTon.toString()),
-          bounce: true,
-          body: forwardPayload
-        })
-      ]
-    });
-
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-async function checkHoneypotAndSafety(pool) {
-  try {
-    const poolAddress = pool.address;
-    
-    const registryUrl = pool.dex === 'STON.fi' 
-      ? `https://api.ston.fi/v1/pools/${poolAddress}`
-      : `https://api.dedust.io/v2/pools/${poolAddress}`;
-      
-    const poolDetails = await httpGet(registryUrl);
-    if (!poolDetails) {
-      return { safe: false, reason: "Havuz detayları okunamadı (API yanıt vermedi)." };
-    }
-
-    return { safe: true };
-  } catch (err) {
-    return { safe: false, reason: `Güvenlik simülasyonu başarısız: ${err.message}` };
-  }
-}
-
 if (bot) {
   bot.on('message', async (msg) => {
     try {
@@ -282,6 +222,8 @@ async function checkAllPools() {
       }
     } catch (e) {}
 
+    await new Promise(r => setTimeout(r, 2000));
+
     try {
       const dedustData = await httpGet('https://api.dedust.io/v2/pools');
       if (Array.isArray(dedustData)) {
@@ -301,14 +243,14 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif (Hatasız Sürüm)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Alım Tutarı: ${BUY_AMOUNT_TON} TON\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (429 Korumalı & Tam Sürüm)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 10 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
 }
 
 initClient().then(() => {
-  setInterval(checkAllPools, 5000);
+  setInterval(checkAllPools, 10000);
   checkAllPools();
 });
 
