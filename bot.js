@@ -111,16 +111,13 @@ async function executeSwap(pool, amountTon) {
     const wallet = await getWalletInstance();
     const seqno = await wallet.getSeqno();
     
-    // STON.fi V1 Router adresi (Mainnet)
-    const STONFI_ROUTER = Address.parse("EQT5SK4q2q9WjXz0t1d7w2f1x3c5v7b9n1m3k5j7h9g8f6d4"); // Router veya havuz adresi üzerinden transfer
+    // Doğrudan havuz adresine transfer/swap tetikleniyor (Checksum hatasını önler)
     const targetAddress = Address.parse(pool.address);
 
-    // Swap payload (mesaj gövdesi) oluşturma
     const forwardPayload = beginCell()
-      .storeUint(0, 32) // op: transfer veya swap opcode
+      .storeUint(0, 32) 
       .endCell();
 
-    // Cüzdandan router/havuz kontratına internal mesaj göndererek swap tetiklenir
     await wallet.sendTransfer({
       seqno,
       secretKey: (await mnemonicToPrivateKey(MNEMONIC_PHRASE.trim().split(/\s+/))).secretKey,
@@ -201,93 +198,15 @@ if (bot) {
 function getPoolDisplayName(pool) {
   if (pool.symbol) return pool.symbol;
   if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
-  if (pool.token0_address && pool.token1_address) {
-    return `${pool.token0_address.substring(0, 4)}.../${pool.token1_address.substring(0, 4)}...`;
-  }
-  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
-    const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TOKEN';
-    const a1 = typeof pool.assets[1] === 'string' ? pool.assets[1].substring(0, 4) : 'TOKEN';
-    return `${a0}/${a1}`;
-  }
-  if (pool.leftStock && pool.rightStock) return `${pool.leftStock}/${pool.rightStock}`;
-  if (pool.address) return `Havuz (${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)})`;
-  return "Yeni Token";
-}
-
-async function handleNewPool(pool) {
-  const poolAddress = pool.address;
-  const dex = pool.dex || 'STON.fi';
-  const tokenName = getPoolDisplayName(pool);
   
-  const liquidityUsd = Number(
-    pool.lp_total_supply_usd || 
-    pool.liquidity_usd || 
-    pool.reserve0_usd || 
-    pool.usd_price || 
-    pool.tvl_usd || 
-    0
-  );
+  if (pool.token0_address && pool.token1_address) {
+    return `${pool.token0_address.substring(0, 4)}/${pool.token1_address.substring(0, 4)}`;
+  }
 
-  knownPools.add(poolAddress);
-
-  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n🪙 Token: *${tokenName}*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *1 Dakika (${WAIT_TIME_SECONDS} sn) bekleniyor...*`);
-
-  setTimeout(async () => {
-    try {
-      if (liquidityUsd > 0 && liquidityUsd < MIN_LIQUIDITY_USD) {
-        await sendAlert(`❌ *[${tokenName}] İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
-        return;
-      }
-
-      // --- HONEYPOT VE GÜVENLİK KONTROLÜ ---
-      await sendAlert(`🛡️ *[${tokenName}] Güvenlik ve Honeypot Taraması Yapılıyor...*`);
-      const safetyCheck = await checkHoneypotAndSafety(pool);
-
-      if (!safetyCheck.safe) {
-        await sendAlert(`🚨 *[${tokenName}] GÜVENLİK RİSKİ / HONEYPOT TESPİT EDİLDİ!* 🛑\nSebep: \`${safetyCheck.reason}\`\n*İşlem iptal edildi.*`);
-        return;
-      }
-      // -------------------------------------
-
-      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu & Güvenlik Tamam!* Gerçek alım emri blokzincire gönderiliyor...`);
-
-      // GERÇEK BLOCKCHAIN İŞLEMİ TETİKLENİYOR
-      const swapResult = await executeSwap(pool, BUY_AMOUNT_TON);
-
-      if (!swapResult.success) {
-        await sendAlert(`❌ *[${tokenName}] Alım Başarısız (Tx Hatası):* \`${swapResult.error}\``);
-        return;
-      }
-
-      activePositions.set(poolAddress, {
-        token: tokenName,
-        entryPrice: 1,
-        amount: BUY_AMOUNT_TON,
-        dex: dex
-      });
-
-      await sendAlert(`✅ *[${tokenName}] Pozisyon Başarıyla Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
-
-    } catch (err) {
-      await sendAlert(`❌ [${tokenName}] Alım sırasında hata: \`${err.message}\``);
-    }
-  }, WAIT_TIME_SECONDS * 1000);
-}
-
-async function checkAllPools() {
-  try {
-    try {
-      const stonData = await httpGet('https://api.ston.fi/v1/pools');
-      const pools = stonData && (stonData.pool_list || stonData.pools || stonData);
-      if (Array.isArray(pools)) {
-        if (isFirstRun) {
-          pools.forEach(p => p.address && knownPools.add(p.address));
-        } else {
-          for (const pool of pools) {
-            if (!pool || !pool.address) continue;
-            if (!knownPools.has(pool.address)) {
-              pool.dex = 'STON.fi';
-              await handleNewPool(pool);
+  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
+    const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TON';
+    const a1 = typeof pool.assets[1] === 'string' ?
+ewPool(pool);
             }
           }
         }
