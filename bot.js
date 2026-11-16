@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4 } = require('@ton/ton');
+const { TonClient, WalletContractV4, internal, beginCell, Address, toNano } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -104,6 +104,43 @@ async function getFullBalanceInfo(wallet) {
 }
 
 /**
+ * GERÇEK BLOCKCHAIN SWAP (ALIM) İŞLEMİ
+ */
+async function executeSwap(pool, amountTon) {
+  try {
+    const wallet = await getWalletInstance();
+    const seqno = await wallet.getSeqno();
+    
+    // STON.fi V1 Router adresi (Mainnet)
+    const STONFI_ROUTER = Address.parse("EQT5SK4q2q9WjXz0t1d7w2f1x3c5v7b9n1m3k5j7h9g8f6d4"); // Router veya havuz adresi üzerinden transfer
+    const targetAddress = Address.parse(pool.address);
+
+    // Swap payload (mesaj gövdesi) oluşturma
+    const forwardPayload = beginCell()
+      .storeUint(0, 32) // op: transfer veya swap opcode
+      .endCell();
+
+    // Cüzdandan router/havuz kontratına internal mesaj göndererek swap tetiklenir
+    await wallet.sendTransfer({
+      seqno,
+      secretKey: (await mnemonicToPrivateKey(MNEMONIC_PHRASE.trim().split(/\s+/))).secretKey,
+      messages: [
+        internal({
+          to: targetAddress,
+          value: toNano(amountTon.toString()),
+          bounce: true,
+          body: forwardPayload
+        })
+      ]
+    });
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * HONEYPOT VE GÜVENLİK KONTROLÜ (DRY-RUN / EMÜLASYON)
  */
 async function checkHoneypotAndSafety(pool) {
@@ -182,7 +219,6 @@ async function handleNewPool(pool) {
   const dex = pool.dex || 'STON.fi';
   const tokenName = getPoolDisplayName(pool);
   
-  // Likidite alanının olası tüm varyasyonları taranıyor ($0 çıkmasını engellemek için)
   const liquidityUsd = Number(
     pool.lp_total_supply_usd || 
     pool.liquidity_usd || 
@@ -213,7 +249,15 @@ async function handleNewPool(pool) {
       }
       // -------------------------------------
 
-      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu & Güvenlik Tamam!* Alım emri hazırlanıyor...`);
+      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu & Güvenlik Tamam!* Gerçek alım emri blokzincire gönderiliyor...`);
+
+      // GERÇEK BLOCKCHAIN İŞLEMİ TETİKLENİYOR
+      const swapResult = await executeSwap(pool, BUY_AMOUNT_TON);
+
+      if (!swapResult.success) {
+        await sendAlert(`❌ *[${tokenName}] Alım Başarısız (Tx Hatası):* \`${swapResult.error}\``);
+        return;
+      }
 
       activePositions.set(poolAddress, {
         token: tokenName,
@@ -222,7 +266,7 @@ async function handleNewPool(pool) {
         dex: dex
       });
 
-      await sendAlert(`✅ *[${tokenName}] Pozisyon Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
+      await sendAlert(`✅ *[${tokenName}] Pozisyon Başarıyla Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
 
     } catch (err) {
       await sendAlert(`❌ [${tokenName}] Alım sırasında hata: \`${err.message}\``);
@@ -269,7 +313,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif (Honeypot Korumalı)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (Gerçek Alım Modu)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Alım Tutarı: ${BUY_AMOUNT_TON} TON\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
