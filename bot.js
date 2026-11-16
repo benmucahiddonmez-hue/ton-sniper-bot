@@ -110,7 +110,6 @@ async function checkHoneypotAndSafety(pool) {
   try {
     const poolAddress = pool.address;
     
-    // 1. DEX API üzerinden havuz ve kontrat durumunu doğrulama
     const registryUrl = pool.dex === 'STON.fi' 
       ? `https://api.ston.fi/v1/pools/${poolAddress}`
       : `https://api.dedust.io/v2/pools/${poolAddress}`;
@@ -120,13 +119,6 @@ async function checkHoneypotAndSafety(pool) {
       return { safe: false, reason: "Havuz detayları okunamadı (API yanıt vermedi)." };
     }
 
-    // 2. Toncenter RPC Emülasyon / Dry-Run Kontrolü
-    const wallet = await getWalletInstance();
-    const walletAddress = wallet.address.toString({ bounceable: false });
-    
-    // Burada simülasyon isteği atılarak kontratın transferi kısıtlayıp kısıtlamadığı denetlenir.
-    // Eğer kontrat satış izni vermiyorsa veya whitelist zorunluysa exit_code hata döner.
-    
     return { safe: true };
   } catch (err) {
     return { safe: false, reason: `Güvenlik simülasyonu başarısız: ${err.message}` };
@@ -179,6 +171,9 @@ function getPoolDisplayName(pool) {
 }
 
 async function handleNewPool(pool) {
+  // Gelen havuz verisinin tam yapısını logluyoruz (Token ismini çözebilmek için)
+  console.log("Gelen Havuz Datası:", JSON.stringify(pool, null, 2));
+
   const poolAddress = pool.address;
   const dex = pool.dex || 'STON.fi';
   const tokenName = getPoolDisplayName(pool);
