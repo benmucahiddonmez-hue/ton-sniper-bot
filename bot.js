@@ -51,7 +51,6 @@ async function getWalletClient() {
 function getPoolDisplayName(pool, attributes) {
     if (attributes && attributes.name) return attributes.name;
     
-    // İlişkilerden veya varlık adlarından isim türetme
     const relationships = pool.relationships || {};
     const baseId = relationships.base_token?.data?.id || "";
     const quoteId = relationships.quote_token?.data?.id || "";
@@ -89,9 +88,6 @@ async function checkSafety(pool) {
         if (response.status !== 200) {
             return { safe: false, reason: `TonAPI yanıt kodu ${response.status}: Token kontrat bilgisi doğrulanamadı.` };
         }
-
-        const jettonData = response.data;
-        // İsteğe bağlı ek kontrat yetki kontrolleri (mintable vb.) buraya eklenebilir
 
         return { safe: true, token: tokenAddress };
     } catch (error) {
@@ -132,7 +128,6 @@ async function sniperWorker() {
 
             if (!tokenAddr || tokenAddr === GRAM_MASTER_ADDRESS || activePositions[tokenAddr]) continue;
 
-            // Token ismini belirle (Örn: GBT/GRAM)
             const tokenName = getPoolDisplayName(pool, attrs);
 
             if (!seenPools[poolAddr]) {
@@ -144,13 +139,11 @@ async function sniperWorker() {
 
             const elapsed = now - poolInfo.firstSeen;
 
-            // Likidite ve Süre Kontrolü
             if (liqUsd >= MIN_LIQUIDITY_USD && (elapsed <= 60 || poolInfo.initialLiq >= MIN_LIQUIDITY_USD)) {
                 try {
                     await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Yeni Havuz Bulundu:** \`${tokenName}\`\n💧 Likidite: \`$${liqUsd.toFixed(2)}\``, { parse_mode: "Markdown" });
                 } catch (e) {}
 
-                // Güvenlik ve İptal Sebebi Taraması
                 const safety = await checkSafety(pool);
                 if (safety.safe) {
                     const swapResult = await executeStonfiSwap(safety.token, 0.5);
@@ -161,14 +154,12 @@ async function sniperWorker() {
                             await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!**\nToken: \`${tokenName}\`\nFiyat: \`$${swapResult.entryPrice}\``, { parse_mode: "Markdown" });
                         } catch (e) {}
                     } else {
-                        // Alım aşamasında hata olursa
                         poolInfo.bought = true;
                         try {
                             await bot.sendMessage(ALLOWED_USER_ID, `❌ **ALIM BAŞARISIZ (${tokenName})**\nSebep: \`${swapResult.error}\``, { parse_mode: "Markdown" });
                         } catch (e) {}
                     }
                 } else {
-                    // Güvenlik testinden geçemezse / iptal olursa detaylı sebep
                     poolInfo.bought = true;
                     try {
                         await bot.sendMessage(ALLOWED_USER_ID, `❌ **İŞLEM İPTAL EDİLDİ (${tokenName})**\n⚠️ **Sebep:** \`${safety.reason}\``, { parse_mode: "Markdown" });
@@ -204,6 +195,20 @@ bot.onText(/\/durdur/, (msg) => {
 bot.onText(/\/durum/, (msg) => {
     if (msg.from.id !== ALLOWED_USER_ID) return;
     bot.sendMessage(msg.chat.id, `📊 Bot Durumu: ${botRunning ? 'Aktif 🟢' : 'Durduruldu 🔴'}\nAçık Pozisyon: ${Object.keys(activePositions).length}`, { parse_mode: "Markdown" });
+});
+
+bot.onText(/\/bakiye/, async (msg) => {
+    if (msg.from.id !== ALLOWED_USER_ID) return;
+    
+    try {
+        const { client, wallet } = await getWalletClient();
+        const balanceNano = await client.getBalance(wallet.address);
+        const balanceTon = Number(balanceNano) / 1e9;
+        
+        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`${balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
+    } catch (error) {
+        bot.sendMessage(msg.chat.id, `❌ Bakiye sorgulama hatası: \`${error.message}\``, { parse_mode: "Markdown" });
+    }
 });
 
 console.log("Node.js Telegram Bot başarıyla başlatıldı ve dinlemede...");
