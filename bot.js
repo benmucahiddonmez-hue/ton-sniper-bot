@@ -1,297 +1,510 @@
-// Kurulum: npm i node-telegram-bot-api @ton/ton @ton/core @ton/crypto @ston-fi/sdk @ston-fi/api
-const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4, internal, beginCell, Address, toNano, fromNano } = require('@ton/ton');
-const { mnemonicToPrivateKey } = require('@ton/crypto');
-const https = require('https');
-const fs = require('fs');
 
-// ================= AYARLAR =================
-const TG_TOKEN = "9161821033:AAGJuqOFm0YeaQ57DgSagjGB6eSfw-8Xc7k";
-const TG_CHAT_ID = "15658"; 
-const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
-const TONCENTER_KEY = "B2f1d3bc2a2894b4604fb615f47e3e0641c7a4b8a2ae76698f1c43938771d510";
+const TelegramBot = require("node-telegram-bot-api");
+const fs = require("fs");
+const path = require("path");
 
-// true: gercek islem YOK, test modu
-const DRY_RUN = true;
-
-const MIN_LIQUIDITY_USD = 40;      
-const MAX_PRICE_IMPACT = 0.05;     
-const MIN_ROUNDTRIP = 0.85;        
-const SLIPPAGE = "0.05";           
-const WAIT_TIME_SECONDS = 60;
-const BUY_AMOUNT_TON = 0.5;
-const TON_RESERVE = 0.3;           
-const TAKE_PROFIT_PCT = 50;
-const STOP_LOSS_PCT = 30;
-const MAX_OPEN_POSITIONS = 3;
-const POLL_INTERVAL_MS = 20000;    
-const MONITOR_INTERVAL_MS = 30000; 
-const STATE_FILE = './state.json';
+// ==========================================
+// RAILWAY AYARLARI
 // ==========================================
 
-let bot = null;
-try {
-  bot = new TelegramBot(TG_TOKEN, { polling: true });
-} catch (e) {
-  console.error("Bot baslatilamadi:", e.message);
+const TG_TOKEN = process.env.TG_TOKEN || "";
+
+const ADMIN_USER_ID = 7511782761;
+const ALERT_CHAT_ID = String(ADMIN_USER_ID);
+
+const DRY_RUN = true;
+
+const POLL_INTERVAL_MS = 20000;
+const REQUEST_TIMEOUT_MS = 12000;
+const STATE_FILE = path.join(process.cwd(), "state.json");
+
+const STON_URL = "https://api.ston.fi/v1/pools";
+const DEDUST_URL = "https://api.dedust.io/v2/pools";
+
+if (!TG_TOKEN) {
+  throw new Error("TG_TOKEN Railway Variables bölümünde bulunamadı!");
 }
 
-let knownPools = new Set();
-let activePositions = new Map();
-let isFirstRun = true;
-let tonClient = null;
-let stonClient = null;
-let apiClient = null;
-let dexFactory = null;
-let walletCache = null;
-let isPolling = false;
-let isMonitoring = false;
+if (!DRY_RUN) {
+  throw new Error("Bu sürüm yalnızca test modunda çalışabilir.");
+}
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// ==========================================
+// BAŞLANGIÇ
+// ==========================================
+
+const bot = new TelegramBot(TG_TOKEN, {
+  polling: true
+});
+
+let knownPools = new Set();
+let isFirstRun = true;
+let isScanning = false;
+let lastScan = null;
+let scanErrors = 0;
+let totalDetected = 0;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ==========================================
+// DURUM KAYDI
+// ==========================================
 
 function loadState() {
   try {
-    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    knownPools = new Set(s.knownPools || []);
-    activePositions = new Map(Object.entries(s.positions || {}));
-    if (knownPools.size > 0) isFirstRun = false;
-    console.log(`Durum yuklendi: ${knownPools.size} havuz, ${activePositions.size} pozisyon`);
-  } catch (e) {}
+    const data = JSON.parse(
+      fs.readFileSync(STATE_FILE, "utf8")
+    );
+
+    knownPools = new Set(data.knownPools || []);
+    isFirstRun = data.initialized !== true;
+
+    console.log(
+      `Durum yüklendi: ${knownPools.size} havuz`
+    );
+
+  } catch (error) {
+    console.log("Yeni durum dosyası oluşturulacak.");
+  }
 }
 
 function saveState() {
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify({
-      knownPools: [...knownPools],
-      positions: Object.fromEntries(activePositions)
-    }));
-  } catch (e) {
-    console.error('State kaydedilemedi:', e.message);
+    const tempFile = STATE_FILE + ".tmp";
+
+    fs.writeFileSync(
+      tempFile,
+      JSON.stringify({
+        initialized: !isFirstRun,
+        knownPools: [...knownPools],
+        totalDetected,
+        updatedAt: new Date().toISOString()
+      })
+    );
+
+    fs.renameSync(tempFile, STATE_FILE);
+
+  } catch (error) {
+    console.error("Kayıt hatası:", error.message);
   }
 }
 
-async function retry(fn, tries = 5) {
-  for (let i = 0; i < tries; i++) {
+// ==========================================
+// HTTP İSTEKLERİ
+// ==========================================
+
+async function getJSON(url, attempts = 4) {
+  for (let i = 0; i < attempts; i++) {
     try {
-      return await fn();
-    } catch (e) {
-      const is429 = String(e && e.message).includes('429') ||
-                    (e && e.response && e.response.status === 429);
-      if (!is429 || i === tries - 1) throw e;
-      await sleep(1000 * 2 ** i);
-    }
-  }
-}
-
-let txQueue = Promise.resolve();
-function enqueue(fn) {
-  const run = txQueue.then(fn, fn);
-  txQueue = run.catch(() => {});
-  return run;
-}
-
-function httpGet(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', ...headers }, timeout: 8000 }, (res) => {
-      let data = '';
-      res.on('data', (c) => data += c);
-      res.on('end', () => {
-        if (res.statusCode === 429) return reject(new Error('Request failed with status code 429'));
-        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('JSON parse hatasi')); }
+      const response = await fetch(url, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "TON-Pool-Monitor/1.0"
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
       });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Zaman asimi')); });
-  });
-}
 
-async function sendAlert(message) {
-  if (!bot || !TG_CHAT_ID) return;
-  try {
-    await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
-  } catch (err) {
-    try { await bot.sendMessage(TG_CHAT_ID, message.replace(/[*_`]/g, '')); }
-    catch (e2) { console.error('Telegram mesaji gonderilemedi:', e2.message); }
-  }
-}
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status}`
+        );
+      }
 
-async function initClient() {
-  tonClient = new TonClient({
-    endpoint: 'https://toncenter.com/api/v2/jsonRPC',
-    apiKey: TONCENTER_KEY
-  });
+      return await response.json();
 
-  const sdk = await import('@ston-fi/sdk');
-  const api = await import('@ston-fi/api');
-  dexFactory = sdk.dexFactory;
-  stonClient = new sdk.Client({
-    endpoint: 'https://toncenter.com/api/v2/jsonRPC',
-    apiKey: TONCENTER_KEY
-  });
-  apiClient = new api.StonApiClient();
-  console.log("TON ve STON.fi istemcileri baslatildi.");
-}
+    } catch (error) {
+      if (i === attempts - 1) throw error;
 
-async function getWallet() {
-  if (walletCache) return walletCache;
-  const words = MNEMONIC_PHRASE.trim().split(/\s+/);
-  if (words.length < 12) throw new Error(`Mnemonic eksik! (Bulunan: ${words.length} kelime)`);
-  const keyPair = await mnemonicToPrivateKey(words);
-  const wc = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
-  walletCache = { wallet: tonClient.open(wc), secretKey: keyPair.secretKey };
-  return walletCache;
-}
+      const delay = Math.min(
+        1000 * Math.pow(2, i),
+        10000
+      );
 
-async function sendTx(txParams) {
-  const { wallet, secretKey } = await getWallet();
-  const seqno = await retry(() => wallet.getSeqno());
-  await retry(() => wallet.sendTransfer({
-    seqno,
-    secretKey,
-    messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body, bounce: true })]
-  }));
-  for (let i = 0; i < 20; i++) {
-    await sleep(3000);
-    const cur = await retry(() => wallet.getSeqno());
-    if (cur > seqno) return true;
-  }
-  throw new Error('Islem zincire girmedi (seqno artmadi)');
-}
-
-async function getJettonInfo(masterAddr) {
-  const res = await retry(() => tonClient.runMethod(Address.parse(masterAddr), 'get_jetton_data'));
-  const totalSupply = res.stack.readBigNumber();
-  const mintable = res.stack.readBigNumber() !== 0n;
-  let admin = null;
-  try { admin = res.stack.readAddressOpt(); } catch (e) { admin = null; }
-  return { totalSupply, mintable, admin };
-}
-
-async function getJettonBalance(masterAddr, ownerAddress) {
-  const r1 = await retry(() => tonClient.runMethod(
-    Address.parse(masterAddr),
-    'get_wallet_address',
-    [{ type: 'slice', cell: beginCell().storeAddress(ownerAddress).endCell() }]
-  ));
-  const jettonWallet = r1.stack.readAddress();
-  try {
-    const r2 = await retry(() => tonClient.runMethod(jettonWallet, 'get_wallet_data'));
-    return r2.stack.readBigNumber();
-  } catch (e) {
-    return 0n; 
-  }
-}
-
-function simulate(offerAddress, askAddress, offerUnits) {
-  return retry(() => apiClient.simulateSwap({
-    offerAddress,
-    askAddress,
-    offerUnits: offerUnits.toString(),
-    slippageTolerance: SLIPPAGE
-  }));
-}
-
-async function resolveToken(pool) {
-  const cands = [pool.token0_address, pool.token1_address].filter(Boolean);
-  for (const c of cands) {
-    try {
-      const sim = await simulate('ton', c, toNano(BUY_AMOUNT_TON.toString()));
-      if (sim && sim.askUnits && BigInt(sim.askUnits) > 0n) return { token: c, sim };
-    } catch (e) {
-      console.error(`resolveToken (${c.substring(0, 6)}...):`, e.message);
+      await sleep(delay);
     }
   }
+}
+
+// ==========================================
+// HAVUZ VERİLERİ
+// ==========================================
+
+function normalizePools(data) {
+  if (Array.isArray(data)) return data;
+
+  if (Array.isArray(data?.pool_list)) {
+    return data.pool_list;
+  }
+
+  if (Array.isArray(data?.pools)) {
+    return data.pools;
+  }
+
+  return [];
+}
+
+function getAddress(pool) {
+  return (
+    pool.address ||
+    pool.pool_address ||
+    pool.poolAddress ||
+    ""
+  );
+}
+
+function getTokenName(pool) {
+  if (pool.symbol) return pool.symbol;
+
+  if (pool.token0_symbol && pool.token1_symbol) {
+    return `${pool.token0_symbol}/${pool.token1_symbol}`;
+  }
+
+  if (Array.isArray(pool.assets) && pool.assets.length >= 2) {
+    return pool.assets.map(asset => {
+      if (typeof asset === "string") {
+        return asset.substring(0, 6);
+      }
+
+      return (
+        asset?.symbol ||
+        asset?.address?.substring(0, 6) ||
+        "TOKEN"
+      );
+    }).join("/");
+  }
+
+  if (pool.token0_address && pool.token1_address) {
+    return (
+      pool.token0_address.substring(0, 6) +
+      "/" +
+      pool.token1_address.substring(0, 6)
+    );
+  }
+
+  return "Bilinmeyen Token";
+}
+
+function getLiquidity(pool) {
+  const fields = [
+    "lp_total_supply_usd",
+    "liquidity_usd",
+    "tvl_usd",
+    "reserve0_usd"
+  ];
+
+  for (const field of fields) {
+    const value = Number(pool[field]);
+
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
   return null;
 }
 
-async function checkSafety(pool) {
+// ==========================================
+// TELEGRAM BİLDİRİMLERİ
+// ==========================================
+
+async function sendAlert(message) {
   try {
-    const resolved = await resolveToken(pool);
-    if (!resolved) return { safe: false, reason: "Token bulunamadi / simulasyon calismadi." };
-    const { token, sim } = resolved;
+    await bot.sendMessage(
+      ALERT_CHAT_ID,
+      message,
+      {
+        disable_web_page_preview: true
+      }
+    );
 
-    const impact = Number(sim.priceImpact || 0);
-    if (impact > MAX_PRICE_IMPACT) {
-      return { safe: false, reason: `Fiyat etkisi yuksek (%${(impact * 100).toFixed(1)}), likidite yetersiz.` };
-    }
-
-    let info;
-    try {
-      info = await getJettonInfo(token);
-    } catch (e) {
-      return { safe: false, reason: `Jeton verisi okunamadi: ${e.message}` };
-    }
-    if (info.mintable && info.admin) {
-      return { safe: false, reason: "Yonetici hala yeni jeton basabiliyor (mint yetkisi acik)." };
-    }
-
-    const sellSim = await simulate(token, 'ton', BigInt(sim.askUnits));
-    const back = Number(BigInt(sellSim.askUnits)) / Number(toNano(BUY_AMOUNT_TON.toString()));
-    if (back < MIN_ROUNDTRIP) {
-      return { safe: false, reason: `Al-sat simulasyonunda sadece %${(back * 100).toFixed(0)} geri donuyor.` };
-    }
-
-    return { safe: true, token, sim, roundTrip: back, impact };
-  } catch (err) {
-    return { safe: false, reason: `Guvenlik kontrolu basarisiz: ${err.message}` };
+  } catch (error) {
+    console.error(
+      "Telegram bildirim hatası:",
+      error.message
+    );
   }
 }
 
-async function executeBuy(token, sim) {
+function isAdmin(msg) {
+  return (
+    msg &&
+    msg.from &&
+    Number(msg.from.id) === ADMIN_USER_ID
+  );
+}
+
+// ==========================================
+// YENİ HAVUZ
+// ==========================================
+
+async function handleNewPool(pool, dex) {
+  const address = getAddress(pool);
+
+  if (!address || knownPools.has(address)) {
+    return;
+  }
+
+  knownPools.add(address);
+  totalDetected++;
+
+  const name = getTokenName(pool);
+  const liquidity = getLiquidity(pool);
+
+  const liquidityText = liquidity === null
+    ? "Bilinmiyor"
+    : `$${liquidity.toFixed(2)}`;
+
+  console.log(
+    `Yeni havuz: ${name} | ${dex} | ${address}`
+  );
+
+  await sendAlert(
+    `🚨 YENİ HAVUZ TESPİT EDİLDİ\n\n` +
+    `DEX: ${dex}\n` +
+    `Token: ${name}\n` +
+    `Adres: ${address}\n` +
+    `Likidite: ${liquidityText}\n\n` +
+    `Mod: TEST\n` +
+    `İşlem: Gerçek alım yapılmadı.\n` +
+    `Not: Bu bildirim güvenlik onayı değildir.`
+  );
+
+  saveState();
+}
+
+// ==========================================
+// DEX TARAMA
+// ==========================================
+
+async function scanSTON() {
+  const data = await getJSON(STON_URL + "?dexV2=true");
+  const pools = normalizePools(data);
+
+  return {
+    name: "STON.fi",
+    pools
+  };
+}
+
+async function scanDeDust() {
+  const data = await getJSON(DEDUST_URL);
+  const pools = normalizePools(data);
+
+  return {
+    name: "DeDust",
+    pools
+  };
+}
+
+// ==========================================
+// TÜM HAVUZLARI TARA
+// ==========================================
+
+async function checkAllPools() {
+  if (isScanning) return;
+
+  isScanning = true;
+
   try {
-    const { wallet } = await getWallet();
-    const balTon = Number(fromNano(await retry(() => tonClient.getBalance(wallet.address))));
-    if (balTon < BUY_AMOUNT_TON + TON_RESERVE) {
-      return { success: false, error: `Yetersiz bakiye (${balTon.toFixed(2)} TON)` };
+    const results = await Promise.allSettled([
+      scanSTON(),
+      scanDeDust()
+    ]);
+
+    let successfulScans = 0;
+
+    for (const result of results) {
+      if (result.status !== "fulfilled") {
+        scanErrors++;
+
+        console.error(
+          "DEX tarama hatası:",
+          result.reason?.message
+        );
+
+        continue;
+      }
+
+      successfulScans++;
+
+      const { name, pools } = result.value;
+
+      console.log(
+        `${name}: ${pools.length} havuz bulundu.`
+      );
+
+      if (isFirstRun) {
+        for (const pool of pools) {
+          const address = getAddress(pool);
+
+          if (address) {
+            knownPools.add(address);
+          }
+        }
+
+        continue;
+      }
+
+      for (const pool of pools) {
+        const address = getAddress(pool);
+
+        if (!address || knownPools.has(address)) {
+          continue;
+        }
+
+        await handleNewPool(pool, name);
+      }
     }
 
-    if (DRY_RUN) return { success: true, tokenAmount: BigInt(sim.askUnits), dryRun: true };
+    if (isFirstRun && successfulScans > 0) {
+      isFirstRun = false;
+      saveState();
 
-    const routerInfo = sim.router;
-    const contracts = dexFactory(routerInfo);
-    const router = stonClient.open(contracts.Router.create(routerInfo.address));
-    const proxyTon = contracts.pTON.create(routerInfo.ptonMasterAddress);
-
-    const txParams = await router.getSwapTonToJettonTxParams({
-      userWalletAddress: wallet.address.toString(),
-      offerAmount: sim.offerUnits,
-      minAskAmount: sim.minAskUnits,
-      askJettonAddress: sim.askAddress,
-      proxyTon
-    });
-
-    await sendTx(txParams);
-
-    let bal = 0n;
-    for (let i = 0; i < 12; i++) {
-      await sleep(5000);
-      bal = await getJettonBalance(token, wallet.address);
-      if (bal > 0n) break;
+      await sendAlert(
+        "✅ SNIPER BOT TEST SÜRÜMÜ AKTİF\n\n" +
+        "STON.fi ve DeDust taraması başlatıldı.\n" +
+        `Başlangıç havuz sayısı: ${knownPools.size}\n` +
+        "Gerçek işlem: Kapalı"
+      );
     }
-    if (bal === 0n) {
-      return { success: false, error: "Tx gonderildi ama jeton bakiyesi gorunmedi." };
+
+    if (successfulScans > 0) {
+      lastScan = new Date().toISOString();
     }
-    return { success: true, tokenAmount: bal };
-  } catch (err) {
-    return { success: false, error: err.message };
+
+    if (successfulScans === 0) {
+      console.log("Hiçbir DEX taranamadı.");
+    }
+
+  } catch (error) {
+    console.error("Tarama hatası:", error.message);
+
+  } finally {
+    isScanning = false;
   }
 }
 
-async function executeSell(pos) {
+// ==========================================
+// TELEGRAM KOMUTLARI
+// ==========================================
+
+bot.on("message", async msg => {
   try {
-    const { wallet } = await getWallet();
-    const amount = BigInt(pos.tokenAmount);
-    const sim = await simulate(pos.tokenAddress, 'ton', amount);
-    const tonOut = Number(fromNano(BigInt(sim.askUnits)));
+    if (!msg.text || !isAdmin(msg)) return;
 
-    if (DRY_RUN) return { success: true, tonOut };
+    const command = msg.text.trim().split(/\s+/)[0];
 
-    const routerInfo = sim.router;
-    const contracts = dexFactory(routerInfo);
-    const router = stonClient.open(contracts.Router.create(routerInfo.address));
-    const proxyTon = contracts.pTON.create(routerInfo.ptonMasterAddress);
+    if (command === "/start" || command === "/yardim") {
+      await bot.sendMessage(
+        msg.chat.id,
+        "🤖 SNIPER BOT TEST PANELİ\n\n" +
+        "/durum - Bot durumu\n" +
+        "/havuzlar - İzlenen havuz sayısı\n" +
+        "/istatistik - Tespit istatistikleri\n" +
+        "/tara - Manuel tarama\n" +
+        "/yardim - Yardım"
+      );
+    }
 
-    const txParams = await router.getSwapJettonToTonTxParams({
+    else if (command === "/durum") {
+      await bot.sendMessage(
+        msg.chat.id,
+        `🤖 BOT DURUMU\n\n` +
+        `Çalışma: AKTİF\n` +
+        `Mod: TEST\n` +
+        `Gerçek işlem: KAPALI\n` +
+        `Yönetici ID: ${ADMIN_USER_ID}\n` +
+        `İzlenen havuz: ${knownPools.size}\n` +
+        `Son tarama: ${lastScan || "Henüz yok"}\n` +
+        `Tarama hatası: ${scanErrors}`
+      );
+    }
+
+    else if (command === "/havuzlar") {
+      await bot.sendMessage(
+        msg.chat.id,
+        `📊 İzlenen havuz sayısı: ${knownPools.size}`
+      );
+    }
+
+    else if (command === "/istatistik") {
+      await bot.sendMessage(
+        msg.chat.id,
+        `📈 İSTATİSTİK\n\n` +
+        `Toplam yeni havuz: ${totalDetected}\n` +
+        `Kayıtlı havuz: ${knownPools.size}\n` +
+        `API hatası: ${scanErrors}\n` +
+        `Mod: TEST`
+      );
+    }
+
+    else if (command === "/tara") {
+      await bot.sendMessage(
+        msg.chat.id,
+        "🔎 Manuel tarama başlatılıyor..."
+      );
+
+      await checkAllPools();
+
+      await bot.sendMessage(
+        msg.chat.id,
+        "✅ Tarama tamamlandı."
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      "Komut hatası:",
+      error.message
+    );
+  }
+});
+
+// ==========================================
+// HATA YÖNETİMİ
+// ==========================================
+
+bot.on("polling_error", error => {
+  console.error(
+    "Telegram polling hatası:",
+    error.message
+  );
+});
+
+process.on("unhandledRejection", error => {
+  console.error("Promise hatası:", error);
+});
+
+process.on("uncaughtException", error => {
+  console.error("Beklenmeyen hata:", error);
+});
+
+// ==========================================
+// BAŞLAT
+// ==========================================
+
+async function start() {
+  console.log("Sniper Bot başlatılıyor...");
+
+  loadState();
+
+  await checkAllPools();
+
+  setInterval(
+    checkAllPools,
+    POLL_INTERVAL_MS
+  );
+
+  console.log("Bot çalışıyor.");
+}
+
+start().catch(error => {
+  console.error("Başlatma hatası:", error.message);
+  process.exit(1);
+});
+   const txParams = await router.getSwapJettonToTonTxParams({
       userWalletAddress: wallet.address.toString(),
       offerJettonAddress: sim.offerAddress,
       offerAmount: sim.offerUnits,
