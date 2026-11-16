@@ -28,7 +28,7 @@ let seenPools = {};
 let activePositions = {};
 let botRunning = false;
 
-// MongoDB Kalıcılık Altyapısı (Railway Ephemeral Disk Koruması)
+// MongoDB Kalıcılık Altyapısı
 let dbClient, positionsCollection;
 async function initDatabase() {
     if (!MONGODB_URI) {
@@ -95,7 +95,6 @@ async function getWalletClient() {
     return { client, wallet: walletProvider, keyPair };
 }
 
-// Güvenli Bakiye Okuma (API Hatalarında Sessizce 0 Dönmez, Hata Fırlatır)
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
     try {
         const headers = { Authorization: `Bearer ${TONAPI_KEY}` };
@@ -147,7 +146,6 @@ async function fetchNewGramPools() {
     }
 }
 
-// 1. Statik Kontrol + 2. Satış Simülasyonu (Dry-Run Test)
 async function checkSafetyWithSimulation(pool) {
     try {
         const tokenAddress = pool.relationships?.base_token?.data?.id?.replace("ton_", "");
@@ -170,7 +168,6 @@ async function checkSafetyWithSimulation(pool) {
         if (data.transfer_fee_enabled === true || (data.custom_payload && data.custom_payload.has_transfer_fee)) return { safe: false, reason: "Güvenlik İhlali: Gizli Transfer Ücreti (Tax) tespit edildi!" };
         if (data.holders_count && data.holders_count < 3) return { safe: false, reason: "Risk: Cüzdan sahibi (holder) sayısı çok yetersiz." };
 
-        // Satış Simülasyonu (Dry-Run)
         try {
             const dexType = pool.attributes?.dex || "stonfi";
             const routerAddress = dexType.toLowerCase().includes('dedust') 
@@ -194,7 +191,6 @@ async function checkSafetyWithSimulation(pool) {
     }
 }
 
-// Resmi DEX-Specific Alım (Buy) Fonksiyonu
 async function executeBuySwap(tokenAddress, amountTon, dexType, poolAttrs) {
     try {
         console.log(`Gerçek Router Alımı Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
@@ -214,14 +210,14 @@ async function executeBuySwap(tokenAddress, amountTon, dexType, poolAttrs) {
         if (dexType.toLowerCase().includes('dedust')) {
             routerAddress = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
             swapPayload = beginCell()
-                .storeUint(0xe332386fn, 32) // DeDust Buy Opcode
+                .storeUint(0xe332386fn, 32)
                 .storeAddress(Address.parse(tokenAddress))
                 .storeCoins(0n)
                 .endCell();
         } else {
             routerAddress = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
             swapPayload = beginCell()
-                .storeUint(0x25937a08n, 32) // STON.fi V2 Buy Opcode
+                .storeUint(0x25937a08n, 32)
                 .storeCoins(0n)
                 .storeAddress(Address.parse(tokenAddress))
                 .endCell();
@@ -268,7 +264,6 @@ async function executeBuySwap(tokenAddress, amountTon, dexType, poolAttrs) {
     }
 }
 
-// DEX-Specific Protokollere Göre Ayrıştırılmış Satış (Sell) Fonksiyonu ve Retry
 async function executeSellSwapWithRetry(tokenAddress, dexType, expectedRawBalance) {
     const maxRetries = 3;
     
@@ -290,39 +285,36 @@ async function executeSellSwapWithRetry(tokenAddress, dexType, expectedRawBalanc
 
             if (dexType.toLowerCase().includes('dedust')) {
                 routerAddress = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
-                // DeDust V2 Forward Payload Standardı
                 forwardPayload = beginCell()
-                    .storeUint(0x47427961, 32) // DeDust swap komutu
-                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c")) // Native TON
-                    .storeCoins(0n) // min_output
+                    .storeUint(0x47427961, 32)
+                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c"))
+                    .storeCoins(0n)
                     .endCell();
             } else {
                 routerAddress = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
-                // STON.fi V2 Forward Payload Standardı
                 forwardPayload = beginCell()
-                    .storeUint(0x5291b434, 32) // STON.fi V2 swap / refund opcode
-                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c")) // Native TON
-                    .coins(0n) // min_output
+                    .storeUint(0x5291b434, 32)
+                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c"))
+                    .coins(0n)
                     .endCell();
             }
 
             const currentSeqno = await wallet.getSeqno();
 
-            // Resmi Jetton Transfer Mesajı İçinde DEX-Specific Forward Payload
             const sellPayload = beginCell()
-                .storeUint(0x0f8a7ea5, 32) // Jetton transfer opcode
-                .storeUint(Date.now(), 64) // query_id
-                .storeCoins(tokensToSell)  // Satılacak miktar
-                .storeAddress(Address.parse(routerAddress)) // Router Adresi
-                .storeAddress(wallet.address) // Response Address
-                .storeBit(true)            // forward_payload var
-                .storeRef(forwardPayload)  // DEX özel talimat hücresi
+                .storeUint(0x0f8a7ea5, 32)
+                .storeUint(Date.now(), 64)
+                .storeCoins(tokensToSell)
+                .storeAddress(Address.parse(routerAddress))
+                .storeAddress(wallet.address)
+                .storeBit(true)
+                .storeRef(forwardPayload)
                 .endCell();
 
             await wallet.send(
                 internal({
                     to: routerAddress,
-                    value: 80000000n, // 0.08 TON gas payı
+                    value: 80000000n,
                     body: sellPayload,
                     bounce: true
                 })
@@ -352,7 +344,6 @@ async function executeSellSwapWithRetry(tokenAddress, dexType, expectedRawBalanc
     return false;
 }
 
-// TP / SL Takip ve 0.5 TON Tabanlı Fallback Destekli Döngü
 async function monitorPositions() {
     while (botRunning) {
         try {
@@ -398,7 +389,6 @@ async function monitorPositions() {
     }
 }
 
-// Ana Sniper Döngüsü
 async function sniperWorker() {
     monitorPositions();
 
@@ -502,69 +492,6 @@ bot.onText(/\/bakiye/, async (msg) => {
 });
 
 console.log("Enterprise Production Sniper Bot başarıyla başlatıldı ve dinlemede...");
-
-process.on('uncaughtException', (err) => {
-  console.error('Yakalanamayan hata:', err);
-});
-process.on('unhandledRejection', (err) => {
-  console.error('Yakalanamayan Promise reddi:', err);
-});
- { parse_mode: "Markdown" });
-                        } catch (e) {}
-                    }
-                } else {
-                    poolInfo.bought = true;
-                    try {
-                        await bot.sendMessage(ALLOWED_USER_ID, `❌ **İŞLEM İPTAL EDİLDİ (${tokenName})**\n⚠️ **Güvenlik Sebebi:** \`${safety.reason}\``, { parse_mode: "Markdown" });
-                    } catch (e) {}
-                }
-            }
-        }
-
-        await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
-    }
-}
-
-// ==========================================
-// TELEGRAM KOMUTLARI
-// ==========================================
-bot.onText(/\/baslat/, (msg) => {
-    if (msg.from.id !== ALLOWED_USER_ID) return;
-    if (!botRunning) {
-        botRunning = true;
-        sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Seqno Onaylı Multi-DEX Sniper Bot Aktif!**", { parse_mode: "Markdown" });
-    } else {
-        bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
-    }
-});
-
-bot.onText(/\/durdur/, (msg) => {
-    if (msg.from.id !== ALLOWED_USER_ID) return;
-    botRunning = false;
-    bot.sendMessage(msg.chat.id, "🛑 Bot durduruldu.", { parse_mode: "Markdown" });
-});
-
-bot.onText(/\/durum/, (msg) => {
-    if (msg.from.id !== ALLOWED_USER_ID) return;
-    bot.sendMessage(msg.chat.id, `📊 Bot Durumu: ${botRunning ? 'Aktif 🟢' : 'Durduruldu 🔴'}\nAçık Pozisyon: ${Object.keys(activePositions).length}`, { parse_mode: "Markdown" });
-});
-
-bot.onText(/\/bakiye/, async (msg) => {
-    if (msg.from.id !== ALLOWED_USER_ID) return;
-    
-    try {
-        const { client, wallet } = await getWalletClient();
-        const balanceNano = await client.getBalance(wallet.address);
-        const balanceTon = Number(balanceNano) / 1e9;
-        
-        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`${balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
-    } catch (error) {
-        bot.sendMessage(msg.chat.id, `❌ Bakiye sorgulama hatası: \`${error.message}\``, { parse_mode: "Markdown" });
-    }
-});
-
-console.log("Seqno Onaylı Multi-DEX Sniper Bot başarıyla başlatıldı ve dinlemede...");
 
 process.on('uncaughtException', (err) => {
   console.error('Yakalanamayan hata:', err);
