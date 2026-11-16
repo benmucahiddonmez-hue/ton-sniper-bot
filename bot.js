@@ -1,189 +1,147 @@
-
 const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
 const path = require("path");
 
-// ==========================================
-// RAILWAY AYARLARI
-// ==========================================
-
-const TG_TOKEN = process.env.TG_TOKEN || "";
+// Railway Variables: TG_TOKEN
+const TG_TOKEN = (process.env.TG_TOKEN || "").trim();
 
 const ADMIN_USER_ID = 7511782761;
 const ALERT_CHAT_ID = String(ADMIN_USER_ID);
 
-const DRY_RUN = true;
-
-const POLL_INTERVAL_MS = 20000;
-const REQUEST_TIMEOUT_MS = 12000;
+const DRY_RUN = true; // Bu dosyada gerçek alım-satım kodu bulunmaz.
+const POLL_INTERVAL_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 12_000;
 const STATE_FILE = path.join(process.cwd(), "state.json");
 
-const STON_URL = "https://api.ston.fi/v1/pools";
-const DEDUST_URL = "https://api.dedust.io/v2/pools";
+const DEX_SOURCES = [
+  { name: "STON.fi", url: "https://api.ston.fi/v1/pools?dexV2=true" },
+  { name: "DeDust", url: "https://api.dedust.io/v2/pools" }
+];
 
 if (!TG_TOKEN) {
-  throw new Error("TG_TOKEN Railway Variables bölümünde bulunamadı!");
+  throw new Error("TG_TOKEN bulunamadı. Railway > Variables bölümüne TG_TOKEN ekleyin.");
 }
-
 if (!DRY_RUN) {
-  throw new Error("Bu sürüm yalnızca test modunda çalışabilir.");
+  throw new Error("Güvenlik nedeniyle bu sürüm yalnızca TEST modunda çalışır.");
 }
 
-// ==========================================
-// BAŞLANGIÇ
-// ==========================================
-
-const bot = new TelegramBot(TG_TOKEN, {
-  polling: true
-});
+const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
 let knownPools = new Set();
-let isFirstRun = true;
-let isScanning = false;
-let lastScan = null;
+let firstRun = true;
+let scanning = false;
+let lastScanAt = null;
 let scanErrors = 0;
 let totalDetected = 0;
+const initializedSources = new Set();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ==========================================
-// DURUM KAYDI
-// ==========================================
-
 function loadState() {
   try {
-    const data = JSON.parse(
-      fs.readFileSync(STATE_FILE, "utf8")
-    );
+    if (!fs.existsSync(STATE_FILE)) return;
 
-    knownPools = new Set(data.knownPools || []);
-    isFirstRun = data.initialized !== true;
+    const saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    knownPools = new Set(Array.isArray(saved.knownPools) ? saved.knownPools : []);
+    firstRun = saved.initialized !== true;
+    totalDetected = Number.isFinite(Number(saved.totalDetected))
+      ? Number(saved.totalDetected)
+      : 0;
 
-    console.log(
-      `Durum yüklendi: ${knownPools.size} havuz`
-    );
-
+    console.log(`Kayıtlı durum yüklendi. Havuz sayısı: ${knownPools.size}`);
   } catch (error) {
-    console.log("Yeni durum dosyası oluşturulacak.");
+    console.error("Durum dosyası okunamadı:", error.message);
   }
 }
 
 function saveState() {
   try {
-    const tempFile = STATE_FILE + ".tmp";
+    const tempFile = `${STATE_FILE}.tmp`;
+    const data = {
+      initialized: !firstRun,
+      knownPools: [...knownPools],
+      totalDetected,
+      updatedAt: new Date().toISOString()
+    };
 
-    fs.writeFileSync(
-      tempFile,
-      JSON.stringify({
-        initialized: !isFirstRun,
-        knownPools: [...knownPools],
-        totalDetected,
-        updatedAt: new Date().toISOString()
-      })
-    );
-
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf8");
     fs.renameSync(tempFile, STATE_FILE);
-
   } catch (error) {
-    console.error("Kayıt hatası:", error.message);
+    console.error("Durum dosyası kaydedilemedi:", error.message);
   }
 }
 
-// ==========================================
-// HTTP İSTEKLERİ
-// ==========================================
-
 async function getJSON(url, attempts = 4) {
-  for (let i = 0; i < attempts; i++) {
+  let lastError;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const response = await fetch(url, {
         headers: {
-          "Accept": "application/json",
+          Accept: "application/json",
           "User-Agent": "TON-Pool-Monitor/1.0"
         },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
       });
 
       if (!response.ok) {
-        throw new Error(
-          `HTTP ${response.status}`
-        );
+        throw new Error(`HTTP ${response.status} - ${response.statusText}`);
       }
 
       return await response.json();
-
     } catch (error) {
-      if (i === attempts - 1) throw error;
-
-      const delay = Math.min(
-        1000 * Math.pow(2, i),
-        10000
-      );
-
-      await sleep(delay);
+      lastError = error;
+      if (attempt < attempts - 1) {
+        await sleep(Math.min(1000 * (2 ** attempt), 8000));
+      }
     }
   }
-}
 
-// ==========================================
-// HAVUZ VERİLERİ
-// ==========================================
+  throw lastError || new Error("API isteği başarısız.");
+}
 
 function normalizePools(data) {
   if (Array.isArray(data)) return data;
 
-  if (Array.isArray(data?.pool_list)) {
-    return data.pool_list;
-  }
-
-  if (Array.isArray(data?.pools)) {
-    return data.pools;
+  for (const key of ["pool_list", "pools", "data"]) {
+    if (Array.isArray(data?.[key])) return data[key];
   }
 
   return [];
 }
 
 function getAddress(pool) {
-  return (
-    pool.address ||
-    pool.pool_address ||
-    pool.poolAddress ||
+  return String(
+    pool?.address ||
+    pool?.pool_address ||
+    pool?.poolAddress ||
     ""
-  );
+  ).trim();
 }
 
 function getTokenName(pool) {
-  if (pool.symbol) return pool.symbol;
+  if (pool?.symbol) return String(pool.symbol);
 
-  if (pool.token0_symbol && pool.token1_symbol) {
+  if (pool?.token0_symbol && pool?.token1_symbol) {
     return `${pool.token0_symbol}/${pool.token1_symbol}`;
   }
 
-  if (Array.isArray(pool.assets) && pool.assets.length >= 2) {
+  if (Array.isArray(pool?.assets) && pool.assets.length >= 2) {
     return pool.assets.map(asset => {
-      if (typeof asset === "string") {
-        return asset.substring(0, 6);
-      }
-
-      return (
-        asset?.symbol ||
-        asset?.address?.substring(0, 6) ||
-        "TOKEN"
-      );
+      if (typeof asset === "string") return asset.slice(0, 10);
+      return asset?.symbol ||
+        String(asset?.address || "").slice(0, 10) ||
+        "TOKEN";
     }).join("/");
   }
 
-  if (pool.token0_address && pool.token1_address) {
-    return (
-      pool.token0_address.substring(0, 6) +
-      "/" +
-      pool.token1_address.substring(0, 6)
-    );
+  if (pool?.token0_address && pool?.token1_address) {
+    return `${String(pool.token0_address).slice(0, 10)}/${String(pool.token1_address).slice(0, 10)}`;
   }
 
-  return "Bilinmeyen Token";
+  return "Bilinmeyen token";
 }
 
 function getLiquidity(pool) {
@@ -195,289 +153,236 @@ function getLiquidity(pool) {
   ];
 
   for (const field of fields) {
-    const value = Number(pool[field]);
-
-    if (Number.isFinite(value) && value > 0) {
-      return value;
-    }
+    const value = Number(pool?.[field]);
+    if (Number.isFinite(value) && value > 0) return value;
   }
 
   return null;
 }
 
-// ==========================================
-// TELEGRAM BİLDİRİMLERİ
-// ==========================================
+function isAdmin(message) {
+  return Number(message?.from?.id) === ADMIN_USER_ID;
+}
 
 async function sendAlert(message) {
   try {
-    await bot.sendMessage(
-      ALERT_CHAT_ID,
-      message,
-      {
-        disable_web_page_preview: true
-      }
-    );
-
+    await bot.sendMessage(ALERT_CHAT_ID, message, {
+      disable_web_page_preview: true
+    });
   } catch (error) {
-    console.error(
-      "Telegram bildirim hatası:",
-      error.message
-    );
+    console.error("Telegram bildirim hatası:", error.message);
   }
 }
 
-function isAdmin(msg) {
-  return (
-    msg &&
-    msg.from &&
-    Number(msg.from.id) === ADMIN_USER_ID
-  );
+async function scanSource(source) {
+  const data = await getJSON(source.url);
+  return {
+    name: source.name,
+    pools: normalizePools(data)
+  };
 }
 
-// ==========================================
-// YENİ HAVUZ
-// ==========================================
-
-async function handleNewPool(pool, dex) {
+async function handleNewPool(pool, dexName) {
   const address = getAddress(pool);
+  if (!address || knownPools.has(address)) return;
 
-  if (!address || knownPools.has(address)) {
-    return;
-  }
-
+  // Önce kaydet: aynı havuz sonraki taramada tekrar bildirilmesin.
   knownPools.add(address);
-  totalDetected++;
+  totalDetected += 1;
+  saveState();
 
-  const name = getTokenName(pool);
+  const tokenName = getTokenName(pool);
   const liquidity = getLiquidity(pool);
-
   const liquidityText = liquidity === null
     ? "Bilinmiyor"
-    : `$${liquidity.toFixed(2)}`;
+    : `$${liquidity.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 
-  console.log(
-    `Yeni havuz: ${name} | ${dex} | ${address}`
-  );
+  console.log(`Yeni havuz: ${tokenName} | ${dexName} | ${address}`);
 
   await sendAlert(
     `🚨 YENİ HAVUZ TESPİT EDİLDİ\n\n` +
-    `DEX: ${dex}\n` +
-    `Token: ${name}\n` +
-    `Adres: ${address}\n` +
+    `DEX: ${dexName}\n` +
+    `Token: ${tokenName}\n` +
+    `Havuz adresi: ${address}\n` +
     `Likidite: ${liquidityText}\n\n` +
-    `Mod: TEST\n` +
-    `İşlem: Gerçek alım yapılmadı.\n` +
-    `Not: Bu bildirim güvenlik onayı değildir.`
+    `Çalışma modu: TEST\n` +
+    `Gerçek alım-satım: KAPALI\n` +
+    `Not: Bu bildirim yatırım veya güvenlik onayı değildir.`
   );
-
-  saveState();
 }
-
-// ==========================================
-// DEX TARAMA
-// ==========================================
-
-async function scanSTON() {
-  const data = await getJSON(STON_URL + "?dexV2=true");
-  const pools = normalizePools(data);
-
-  return {
-    name: "STON.fi",
-    pools
-  };
-}
-
-async function scanDeDust() {
-  const data = await getJSON(DEDUST_URL);
-  const pools = normalizePools(data);
-
-  return {
-    name: "DeDust",
-    pools
-  };
-}
-
-// ==========================================
-// TÜM HAVUZLARI TARA
-// ==========================================
 
 async function checkAllPools() {
-  if (isScanning) return;
+  if (scanning) {
+    console.log("Önceki tarama devam ediyor; bu tur atlandı.");
+    return;
+  }
 
-  isScanning = true;
+  scanning = true;
 
   try {
-    const results = await Promise.allSettled([
-      scanSTON(),
-      scanDeDust()
-    ]);
+    const results = await Promise.allSettled(
+      DEX_SOURCES.map(scanSource)
+    );
 
-    let successfulScans = 0;
+    let successfulSources = 0;
 
-    for (const result of results) {
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      const sourceName = DEX_SOURCES[index].name;
+
       if (result.status !== "fulfilled") {
-        scanErrors++;
-
-        console.error(
-          "DEX tarama hatası:",
-          result.reason?.message
-        );
-
+        scanErrors += 1;
+        console.error(`${sourceName} tarama hatası:`, result.reason?.message || result.reason);
         continue;
       }
 
-      successfulScans++;
-
+      successfulSources += 1;
       const { name, pools } = result.value;
+      console.log(`${name}: ${pools.length} havuz bulundu.`);
 
-      console.log(
-        `${name}: ${pools.length} havuz bulundu.`
-      );
-
-      if (isFirstRun) {
+      if (firstRun) {
+        // İlk başarılı tarama mevcut havuzları başlangıç verisi sayar.
         for (const pool of pools) {
           const address = getAddress(pool);
-
-          if (address) {
-            knownPools.add(address);
+          if (address) knownPools.add(address);
+        }
+        initializedSources.add(name);
+      } else {
+        for (const pool of pools) {
+          const address = getAddress(pool);
+          if (address && !knownPools.has(address)) {
+            await handleNewPool(pool, name);
           }
         }
-
-        continue;
-      }
-
-      for (const pool of pools) {
-        const address = getAddress(pool);
-
-        if (!address || knownPools.has(address)) {
-          continue;
-        }
-
-        await handleNewPool(pool, name);
       }
     }
 
-    if (isFirstRun && successfulScans > 0) {
-      isFirstRun = false;
+    // Her iki kaynak en az bir kez başarıyla taranınca başlangıç tamamlanır.
+    if (
+      firstRun &&
+      DEX_SOURCES.every(source => initializedSources.has(source.name))
+    ) {
+      firstRun = false;
       saveState();
 
       await sendAlert(
-        "✅ SNIPER BOT TEST SÜRÜMÜ AKTİF\n\n" +
-        "STON.fi ve DeDust taraması başlatıldı.\n" +
-        `Başlangıç havuz sayısı: ${knownPools.size}\n` +
-        "Gerçek işlem: Kapalı"
+        `✅ TON HAVUZ İZLEME BOTU AKTİF\n\n` +
+        `Başlangıçta kaydedilen havuz: ${knownPools.size}\n` +
+        `DEX kaynakları: STON.fi ve DeDust\n` +
+        `Tarama aralığı: ${POLL_INTERVAL_MS / 1000} saniye\n` +
+        `Mod: TEST — gerçek işlem kapalı`
       );
     }
 
-    if (successfulScans > 0) {
-      lastScan = new Date().toISOString();
+    if (successfulSources > 0) {
+      lastScanAt = new Date().toISOString();
+      saveState();
+    } else {
+      console.log("Bu turda hiçbir DEX kaynağına ulaşılamadı.");
     }
-
-    if (successfulScans === 0) {
-      console.log("Hiçbir DEX taranamadı.");
-    }
-
   } catch (error) {
-    console.error("Tarama hatası:", error.message);
-
+    scanErrors += 1;
+    console.error("Tarama sırasında hata:", error.message);
   } finally {
-    isScanning = false;
+    scanning = false;
   }
 }
 
-// ==========================================
-// TELEGRAM KOMUTLARI
-// ==========================================
-
-bot.on("message", async msg => {
+bot.on("message", async message => {
   try {
-    if (!msg.text || !isAdmin(msg)) return;
+    if (!message?.text || !isAdmin(message)) return;
 
-    const command = msg.text.trim().split(/\s+/)[0];
+    const command = message.text.trim().split(/\s+/)[0]
+      .split("@")[0]
+      .toLowerCase();
 
     if (command === "/start" || command === "/yardim") {
       await bot.sendMessage(
-        msg.chat.id,
-        "🤖 SNIPER BOT TEST PANELİ\n\n" +
-        "/durum - Bot durumu\n" +
-        "/havuzlar - İzlenen havuz sayısı\n" +
-        "/istatistik - Tespit istatistikleri\n" +
-        "/tara - Manuel tarama\n" +
-        "/yardim - Yardım"
+        message.chat.id,
+        `🤖 TON HAVUZ İZLEME — TEST PANELİ\n\n` +
+        `/durum — Botun çalışma durumu\n` +
+        `/havuzlar — Kayıtlı havuz sayısı\n` +
+        `/istatistik — Tespit istatistikleri\n` +
+        `/tara — Manuel tarama\n` +
+        `/yardim — Komut listesi\n\n` +
+        `Gerçek alım-satım bu sürümde kapalıdır.`
       );
+      return;
     }
 
-    else if (command === "/durum") {
+    if (command === "/durum") {
       await bot.sendMessage(
-        msg.chat.id,
+        message.chat.id,
         `🤖 BOT DURUMU\n\n` +
-        `Çalışma: AKTİF\n` +
+        `Çalışma: ${scanning ? "Tarama yapılıyor" : "Aktif"}\n` +
         `Mod: TEST\n` +
         `Gerçek işlem: KAPALI\n` +
         `Yönetici ID: ${ADMIN_USER_ID}\n` +
-        `İzlenen havuz: ${knownPools.size}\n` +
-        `Son tarama: ${lastScan || "Henüz yok"}\n` +
-        `Tarama hatası: ${scanErrors}`
-      );
-    }
-
-    else if (command === "/havuzlar") {
-      await bot.sendMessage(
-        msg.chat.id,
-        `📊 İzlenen havuz sayısı: ${knownPools.size}`
-      );
-    }
-
-    else if (command === "/istatistik") {
-      await bot.sendMessage(
-        msg.chat.id,
-        `📈 İSTATİSTİK\n\n` +
-        `Toplam yeni havuz: ${totalDetected}\n` +
         `Kayıtlı havuz: ${knownPools.size}\n` +
-        `API hatası: ${scanErrors}\n` +
-        `Mod: TEST`
+        `Son başarılı tarama: ${lastScanAt || "Henüz yok"}\n` +
+        `API hata sayısı: ${scanErrors}`
       );
+      return;
     }
 
-    else if (command === "/tara") {
+    if (command === "/havuzlar") {
       await bot.sendMessage(
-        msg.chat.id,
-        "🔎 Manuel tarama başlatılıyor..."
+        message.chat.id,
+        `📊 Kayıtlı havuz sayısı: ${knownPools.size}`
       );
+      return;
+    }
 
+    if (command === "/istatistik") {
+      await bot.sendMessage(
+        message.chat.id,
+        `📈 İSTATİSTİK\n\n` +
+        `Toplam yeni havuz bildirimi: ${totalDetected}\n` +
+        `Kayıtlı havuz: ${knownPools.size}\n` +
+        `API hata sayısı: ${scanErrors}\n` +
+        `Çalışma modu: TEST`
+      );
+      return;
+    }
+
+    if (command === "/tara") {
+      await bot.sendMessage(message.chat.id, "🔎 Manuel tarama başlatılıyor...");
       await checkAllPools();
-
-      await bot.sendMessage(
-        msg.chat.id,
-        "✅ Tarama tamamlandı."
-      );
+      await bot.sendMessage(message.chat.id, "✅ Tarama turu tamamlandı.");
     }
-
   } catch (error) {
-    console.error(
-      "Komut hatası:",
-      error.message
-    );
+    console.error("Komut işleme hatası:", error.message);
   }
 });
 
-// ==========================================
-// HATA YÖNETİMİ
-// ==========================================
-
 bot.on("polling_error", error => {
-  console.error(
-    "Telegram polling hatası:",
-    error.message
-  );
+  console.error("Telegram polling hatası:", error.message);
 });
 
 process.on("unhandledRejection", error => {
-  console.error("Promise hatası:", error);
+  console.error("Yakalanmamış Promise hatası:", error);
 });
 
-process.on("uncaughtException", error => {
+async function start() {
+  console.log("TON havuz izleme botu başlatılıyor...");
+  loadState();
+
+  // İlk tarama, zamanlayıcı kurulmadan önce tamamlanır.
+  await checkAllPools();
+
+  setInterval(() => {
+    checkAllPools().catch(error => {
+      console.error("Zamanlanmış tarama hatası:", error.message);
+    });
+  }, POLL_INTERVAL_MS);
+
+  console.log(`Bot hazır. Tarama aralığı: ${POLL_INTERVAL_MS / 1000} saniye.`);
+}
+
+start().catch(error => {
+  console.error("Bot başlatılamadı:", error);
+  process.exit(1);
+});or => {
   console.error("Beklenmeyen hata:", error);
 });
 
