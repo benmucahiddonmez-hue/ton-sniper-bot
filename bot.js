@@ -103,15 +103,11 @@ async function getFullBalanceInfo(wallet) {
   }
 }
 
-/**
- * GERÇEK BLOCKCHAIN SWAP (ALIM) İŞLEMİ
- */
 async function executeSwap(pool, amountTon) {
   try {
     const wallet = await getWalletInstance();
     const seqno = await wallet.getSeqno();
     
-    // Doğrudan havuz adresine transfer/swap tetikleniyor (Checksum hatasını önler)
     const targetAddress = Address.parse(pool.address);
 
     const forwardPayload = beginCell()
@@ -137,9 +133,6 @@ async function executeSwap(pool, amountTon) {
   }
 }
 
-/**
- * HONEYPOT VE GÜVENLİK KONTROLÜ (DRY-RUN / EMÜLASYON)
- */
 async function checkHoneypotAndSafety(pool) {
   try {
     const poolAddress = pool.address;
@@ -198,15 +191,91 @@ if (bot) {
 function getPoolDisplayName(pool) {
   if (pool.symbol) return pool.symbol;
   if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
-  
   if (pool.token0_address && pool.token1_address) {
     return `${pool.token0_address.substring(0, 4)}/${pool.token1_address.substring(0, 4)}`;
   }
-
   if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
     const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TON';
-    const a1 = typeof pool.assets[1] === 'string' ?
-ewPool(pool);
+    const a1 = typeof pool.assets[1] === 'string' ? pool.assets[1].substring(0, 4) : 'TOKEN';
+    return `${a0}/${a1}`;
+  }
+  if (pool.address) {
+    return `Pool_${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)}`;
+  }
+  return "Yeni Token";
+}
+
+async function handleNewPool(pool) {
+  const poolAddress = pool.address;
+  const dex = pool.dex || 'STON.fi';
+  const tokenName = getPoolDisplayName(pool);
+  
+  const liquidityUsd = Number(
+    pool.lp_total_supply_usd || 
+    pool.liquidity_usd || 
+    pool.reserve0_usd || 
+    pool.usd_price || 
+    pool.tvl_usd || 
+    0
+  );
+
+  knownPools.add(poolAddress);
+
+  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n🪙 Token: *${tokenName}*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *1 Dakika (${WAIT_TIME_SECONDS} sn) bekleniyor...*`);
+
+  setTimeout(async () => {
+    try {
+      if (liquidityUsd > 0 && liquidityUsd < MIN_LIQUIDITY_USD) {
+        await sendAlert(`❌ *[${tokenName}] İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
+        return;
+      }
+
+      await sendAlert(`🛡️ *[${tokenName}] Güvenlik ve Honeypot Taraması Yapılıyor...*`);
+      const safetyCheck = await checkHoneypotAndSafety(pool);
+
+      if (!safetyCheck.safe) {
+        await sendAlert(`🚨 *[${tokenName}] GÜVENLİK RİSKİ / HONEYPOT TESPİT EDİLDİ!* 🛑\nSebep: \`${safetyCheck.reason}\`\n*İşlem iptal edildi.*`);
+        return;
+      }
+
+      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu & Güvenlik Tamam!* Gerçek alım emri blokzincire gönderiliyor...`);
+
+      const swapResult = await executeSwap(pool, BUY_AMOUNT_TON);
+
+      if (!swapResult.success) {
+        await sendAlert(`❌ *[${tokenName}] Alım Başarısız (Tx Hatası):* \`${swapResult.error}\``);
+        return;
+      }
+
+      activePositions.set(poolAddress, {
+        token: tokenName,
+        entryPrice: 1,
+        amount: BUY_AMOUNT_TON,
+        dex: dex
+      });
+
+      await sendAlert(`✅ *[${tokenName}] Pozisyon Başarıyla Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
+
+    } catch (err) {
+      await sendAlert(`❌ [${tokenName}] Alım sırasında hata: \`${err.message}\``);
+    }
+  }, WAIT_TIME_SECONDS * 1000);
+}
+
+async function checkAllPools() {
+  try {
+    try {
+      const stonData = await httpGet('https://api.ston.fi/v1/pools');
+      const pools = stonData && (stonData.pool_list || stonData.pools || stonData);
+      if (Array.isArray(pools)) {
+        if (isFirstRun) {
+          pools.forEach(p => p.address && knownPools.add(p.address));
+        } else {
+          for (const pool of pools) {
+            if (!pool || !pool.address) continue;
+            if (!knownPools.has(pool.address)) {
+              pool.dex = 'STON.fi';
+              await handleNewPool(pool);
             }
           }
         }
@@ -232,7 +301,7 @@ ewPool(pool);
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif (Gerçek Alım Modu)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Alım Tutarı: ${BUY_AMOUNT_TON} TON\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (Hatasız Sürüm)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Alım Tutarı: ${BUY_AMOUNT_TON} TON\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
