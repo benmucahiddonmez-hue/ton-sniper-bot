@@ -5,7 +5,8 @@ const https = require('https');
 
 const TG_TOKEN = "9161821033:AAGJuqOFm0YeaQ57DgSagjGB6eSfw-8Xc7k";
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
-const MNEMONIC_PHRASE = process.env.WALLET_MNEMONIC || "";
+
+const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
 
 const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
@@ -52,9 +53,6 @@ async function initClient() {
 }
 
 async function getWalletInstance() {
-  if (!MNEMONIC_PHRASE || typeof MNEMONIC_PHRASE !== 'string') {
-    throw new Error("WALLET_MNEMONIC Railway'de tanımlı değil veya boş!");
-  }
   const words = MNEMONIC_PHRASE.trim().split(/\s+/);
   if (words.length < 12) {
     throw new Error(`Mnemonic kelimeleri eksik! (Bulunan: ${words.length} kelime)`);
@@ -105,11 +103,13 @@ bot.on('message', async (msg) => {
 
       const info = await getFullBalanceInfo(wallet);
       
-      let jetonText = info.jettons.length > 0 ? info.jettons.join('\n') : "- Hiç jeton bulunamadı";
+      const jetonArray = info && Array.isArray(info.jetons) ? info.jetons : [];
+      let jetonText = jetonArray.length > 0 ? jetonArray.join('\n') : "- Hiç jeton bulunamadı";
+      const tonVal = info && typeof info.ton === 'number' ? info.ton : 0;
       
       const report = `💰 *Cüzdan Bakiye Raporu*\n` +
                      `- **Adres:** \`${walletAddress}\`\n` +
-                     `- **Ana TON:** \`${info.ton.toFixed(4)} TON\`\n` +
+                     `- **Ana TON:** \`${tonVal.toFixed(4)} TON\`\n` +
                      `📦 *Jetonlar:*\n${jetonText}\n` +
                      `- **İzlenen Havuz:** \`${knownPools.size}\``;
 
@@ -171,9 +171,4 @@ async function checkAllPools() {
 }
 
 initClient().then(() => {
-  setInterval(checkAllPools, 15000);
-  checkAllPools();
-});
-
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+  setInterval
