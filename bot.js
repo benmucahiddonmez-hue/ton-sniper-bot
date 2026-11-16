@@ -51,22 +51,24 @@ async function initClient() {
 }
 
 async function getWalletInstance() {
+  if (!MNEMONIC_PHRASE || typeof MNEMONIC_PHRASE !== 'string') {
+    throw new Error("WALLET_MNEMONIC Railway'de tanımlı değil veya boş!");
+  }
   const words = MNEMONIC_PHRASE.trim().split(/\s+/);
-  if (words.length < 12) throw new Error("Mnemonic kelimeleri eksik!");
+  if (words.length < 12) {
+    throw new Error(`Mnemonic kelimeleri eksik! (Bulunan: ${words.length} kelime)`);
+  }
   
   const keyPair = await mnemonicToPrivateKey(words);
   const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
   return tonClient.open(wallet);
 }
 
-// Hem Ana TON hem de tüm jetonları detaylı çeken fonksiyon
 async function getFullBalanceInfo(wallet) {
   try {
-    // 1. Ana TON bakiyesi
     const balanceNano = await tonClient.getBalance(wallet.address);
     const tonBalance = Number(balanceNano) / 1e9;
 
-    // 2. Jeton bakiyeleri
     const walletAddress = wallet.address.toString({ bounceable: false });
     const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     const data = await httpGet(url);
