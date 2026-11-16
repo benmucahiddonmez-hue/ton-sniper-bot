@@ -8,12 +8,11 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
 
-// Strateji Parametreleri
-const MIN_LIQUIDITY_USD = 40; // Minimum 40$ likidite
-const WAIT_TIME_SECONDS = 60; // 1 Dakika (60 saniye) bekleme süresi
-const BUY_AMOUNT_TON = 0.5;   // Her işlemde harcanacak TON miktarı
-const TAKE_PROFIT_PCT = 50;   // %50 Kâr al
-const STOP_LOSS_PCT = 30;     // %30 Zarar kes
+const MIN_LIQUIDITY_USD = 40; 
+const WAIT_TIME_SECONDS = 60; 
+const BUY_AMOUNT_TON = 0.5;   
+const TAKE_PROFIT_PCT = 50;   
+const STOP_LOSS_PCT = 30;     
 
 let bot = null;
 try {
@@ -80,7 +79,6 @@ async function getWalletInstance() {
 
 async function getFullBalanceInfo(wallet) {
   try {
-    const balanceNano = ``;
     const balance = await tonClient.getBalance(wallet.address);
     const tonBalance = Number(balance) / 1e9;
 
@@ -141,13 +139,11 @@ if (bot) {
   });
 }
 
-// Gelişmiş Token İsmi Yakalama Fonksiyonu
 function getPoolDisplayName(pool) {
   if (pool.symbol) return pool.symbol;
   if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
   if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) return `${pool.assets[0]}/${pool.assets[1]}`;
   if (pool.leftStock && pool.rightStock) return `${pool.leftStock}/${pool.rightStock}`;
-  // Eğer hiçbir sembol bulunamazsa adresin başını ve sonunu göster
   if (pool.address) return `Havuz (${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)})`;
   return "Yeni Token";
 }
@@ -225,14 +221,13 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif (Ultra Hızlı + 1dk Bekleme)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (Stabil Tarama)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
 }
 
 initClient().then(() => {
-  // 5 saniyede bir hızlı tarama
   setInterval(checkAllPools, 5000);
   checkAllPools();
 });
