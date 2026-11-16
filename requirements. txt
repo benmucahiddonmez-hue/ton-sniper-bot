@@ -1,0 +1,4 @@
+python-telegram-bot==21.10
+aiohttp==3.11.2
+pytoniq==0.1.34
+tonsdk==1.0.8
