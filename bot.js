@@ -125,7 +125,7 @@ console.log("Node.js Telegram Bot dinlemede...");
 h(error => {
       console.error("Zamanlanmış tarama hatası:", error.message);
     });
-  }, POLL_INTERVAL_MS);
+  }, (POLL_INTERVAL_MS);
 
   console.log(`Bot hazır. Tarama aralığı: ${POLL_INTERVAL_MS / 1000} saniye.`);
 }
