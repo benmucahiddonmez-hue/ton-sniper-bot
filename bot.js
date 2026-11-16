@@ -22,7 +22,7 @@ const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
 const TAKE_PROFIT_PCT = 35.0;
 const STOP_LOSS_PCT = -25.0;
-const SCAN_INTERVAL = 10000; // 10 saniye
+const SCAN_INTERVAL = 30000; // 30 saniye (GeckoTerminal 429 koruması için)
 
 let seenPools = {};
 let activePositions = {};
@@ -61,14 +61,19 @@ function getPoolDisplayName(pool, attributes) {
     return "YENİ/GRAM";
 }
 
-// 1. Yeni Havuzları Çekme (GeckoTerminal)
+// 1. Yeni Havuzları Çekme (GeckoTerminal - 429 Korumalı)
 async function fetchNewGramPools() {
     try {
         const url = `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${GRAM_MASTER_ADDRESS}/pools?page=1`;
         const response = await axios.get(url, { timeout: 8000 });
         return response.data.data || [];
     } catch (error) {
-        console.error("Havuz verisi çekme hatası:", error.message);
+        if (error.response && error.response.status === 429) {
+            console.warn("⚠️ GeckoTerminal 429 (Too Many Requests) alındı, 15 saniye bekleniyor...");
+            await new Promise(resolve => setTimeout(resolve, 15000));
+        } else {
+            console.error("Havuz verisi çekme hatası:", error.message);
+        }
         return [];
     }
 }
@@ -118,6 +123,7 @@ async function sniperWorker() {
         const pools = await fetchNewGramPools();
 
         for (const pool of pools) {
+            if (!botRunning) break;
             if (!pool || !pool.attributes) continue;
             const attrs = pool.attributes;
             const poolAddr = attrs.address;
@@ -193,6 +199,7 @@ bot.onText(/\/durdur/, (msg) => {
 });
 
 bot.onText(/\/durum/, (msg) => {
+    if (msg.from.id !== ALLOWED_USER_ID -> msg.from.id !== ALLOWED_USER_ID) return;
     if (msg.from.id !== ALLOWED_USER_ID) return;
     bot.sendMessage(msg.chat.id, `📊 Bot Durumu: ${botRunning ? 'Aktif 🟢' : 'Durduruldu 🔴'}\nAçık Pozisyon: ${Object.keys(activePositions).length}`, { parse_mode: "Markdown" });
 });
