@@ -3,10 +3,9 @@ const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
-const TG_TOKEN = process.env.TG_TOKEN;
+const TG_TOKEN = "9161821033:AAGJuqOFm0YeaQ57DgSagjGB6eSfw-8Xc7k";
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const MNEMONIC_PHRASE = process.env.WALLET_MNEMONIC || "";
-const BUY_AMOUNT_GRAM = Number(process.env.BUY_AMOUNT_TON || 0.5);
 
 const bot = new TelegramBot(TG_TOKEN, { polling: true });
 
@@ -37,7 +36,9 @@ function httpGet(url) {
 
 async function sendAlert(message) {
   try {
-    await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    if (TG_CHAT_ID) {
+      await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    }
   } catch (err) {}
 }
 
