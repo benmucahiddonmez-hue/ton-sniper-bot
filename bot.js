@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TonClient, WalletContractV4, internal, beginCell, Address } = require('@ton/ton');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const https = require('https');
 
@@ -10,7 +10,7 @@ const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic crick
 
 // Strateji Parametreleri
 const MIN_LIQUIDITY_USD = 40; // Minimum 40$ likidite
-const WAIT_TIME_SECONDS = 30; // Havuz açıldıktan sonra beklenecek süre
+const WAIT_TIME_SECONDS = 60; // 1 Dakika (60 saniye) bekleme süresi
 const BUY_AMOUNT_TON = 0.5;   // Her işlemde harcanacak TON miktarı
 const TAKE_PROFIT_PCT = 50;   // %50 Kâr al
 const STOP_LOSS_PCT = 30;     // %30 Zarar kes
@@ -80,8 +80,9 @@ async function getWalletInstance() {
 
 async function getFullBalanceInfo(wallet) {
   try {
-    const balanceNano = await tonClient.getBalance(wallet.address);
-    const tonBalance = Number(balanceNano) / 1e9;
+    const balanceNano = ``;
+    const balance = await tonClient.getBalance(wallet.address);
+    const tonBalance = Number(balance) / 1e9;
 
     const walletAddress = wallet.address.toString({ bounceable: false });
     const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
@@ -91,9 +92,9 @@ async function getFullBalanceInfo(wallet) {
     if (data && data.ok && Array.isArray(data.result)) {
       for (const j of data.result) {
         const symbol = j.symbol || (j.metadata && j.metadata.symbol) || 'JETON';
-        const balance = j.balance ? Number(j.balance) / 1e9 : 0;
-        if (balance > 0) {
-          jetonsList.push(`- ${balance.toFixed(4)} ${symbol}`);
+        const bal = j.balance ? Number(j.balance) / 1e9 : 0;
+        if (bal > 0) {
+          jetonsList.push(`- ${bal.toFixed(4)} ${symbol}`);
         }
       }
     }
@@ -140,12 +141,15 @@ if (bot) {
   });
 }
 
-// Havuz bilgilerinden token isimlerini (örn: GRAM/TON) çıkaran yardımcı fonksiyon
+// Gelişmiş Token İsmi Yakalama Fonksiyonu
 function getPoolDisplayName(pool) {
   if (pool.symbol) return pool.symbol;
   if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
-  if (pool.router_key) return pool.router_key;
-  return "Bilinmeyen Token";
+  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) return `${pool.assets[0]}/${pool.assets[1]}`;
+  if (pool.leftStock && pool.rightStock) return `${pool.leftStock}/${pool.rightStock}`;
+  // Eğer hiçbir sembol bulunamazsa adresin başını ve sonunu göster
+  if (pool.address) return `Havuz (${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)})`;
+  return "Yeni Token";
 }
 
 async function handleNewPool(pool) {
@@ -156,7 +160,7 @@ async function handleNewPool(pool) {
 
   knownPools.add(poolAddress);
 
-  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n🪙 Token: *${tokenName}*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *${WAIT_TIME_SECONDS} saniye bekleniyor...*`);
+  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n🪙 Token: *${tokenName}*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *1 Dakika (${WAIT_TIME_SECONDS} sn) bekleniyor...*`);
 
   setTimeout(async () => {
     try {
@@ -165,7 +169,7 @@ async function handleNewPool(pool) {
         return;
       }
 
-      await sendAlert(`🚀 *[${tokenName}] Süre doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
+      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
 
       activePositions.set(poolAddress, {
         token: tokenName,
@@ -221,14 +225,15 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper & Trading Bot Aktif!* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Kâr/Zarar: +%${TAKE_PROFIT_PCT} / -%${STOP_LOSS_PCT}\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (Ultra Hızlı + 1dk Bekleme)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
 }
 
 initClient().then(() => {
-  setInterval(checkAllPools, 15000);
+  // 5 saniyede bir hızlı tarama
+  setInterval(checkAllPools, 5000);
   checkAllPools();
 });
 
