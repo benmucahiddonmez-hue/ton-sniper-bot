@@ -8,7 +8,12 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
 
-const bot = new TelegramBot(TG_TOKEN, { polling: true });
+let bot = null;
+try {
+  bot = new TelegramBot(TG_TOKEN, { polling: true });
+} catch (e) {
+  console.error("Bot başlatılamadı:", e.message);
+}
 
 let knownPools = new Set();
 let isFirstRun = true;
@@ -37,7 +42,7 @@ function httpGet(url) {
 
 async function sendAlert(message) {
   try {
-    if (TG_CHAT_ID) {
+    if (bot && TG_CHAT_ID) {
       await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
     }
   } catch (err) {}
@@ -49,7 +54,9 @@ async function initClient() {
       endpoint: 'https://toncenter.com/api/v2/jsonRPC'
     });
     console.log("TON istemcisi başlatıldı.");
-  } catch (err) {}
+  } catch (err) {
+    console.error("TON istemci hatası:", err.message);
+  }
 }
 
 async function getWalletInstance() {
@@ -89,36 +96,40 @@ async function getFullBalanceInfo(wallet) {
   }
 }
 
-bot.on('message', async (msg) => {
-  if (!msg || !msg.text) return;
-  const chatId = msg.chat.id;
-  const text = msg.text.trim();
-
-  if (text === '/bakiye') {
+if (bot) {
+  bot.on('message', async (msg) => {
     try {
-      const wallet = await getWalletInstance();
-      const walletAddress = wallet.address.toString({ bounceable: false });
+      if (!msg || !msg.text) return;
+      const chatId = msg.chat.id;
+      const text = msg.text.trim();
 
-      await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
+      if (text === '/bakiye') {
+        const wallet = await getWalletInstance();
+        const walletAddress = wallet.address.toString({ bounceable: false });
 
-      const info = await getFullBalanceInfo(wallet);
-      
-      const jetonArray = info && Array.isArray(info.jetons) ? info.jetons : [];
-      let jetonText = jetonArray.length > 0 ? jetonArray.join('\n') : "- Hiç jeton bulunamadı";
-      const tonVal = info && typeof info.ton === 'number' ? info.ton : 0;
-      
-      const report = `💰 *Cüzdan Bakiye Raporu*\n` +
-                     `- **Adres:** \`${walletAddress}\`\n` +
-                     `- **Ana TON:** \`${tonVal.toFixed(4)} TON\`\n` +
-                     `📦 *Jetonlar:*\n${jetonText}\n` +
-                     `- **İzlenen Havuz:** \`${knownPools.size}\``;
+        await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
 
-      await bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+        const info = await getFullBalanceInfo(wallet);
+        
+        const jetonArray = info && Array.isArray(info.jetons) ? info.jetons : [];
+        let jetonText = jetonArray.length > 0 ? jetonArray.join('\n') : "- Hiç jeton bulunamadı";
+        const tonVal = info && typeof info.ton === 'number' ? info.ton : 0;
+        
+        const report = `💰 *Cüzdan Bakiye Raporu*\n` +
+                       `- **Adres:** \`${walletAddress}\`\n` +
+                       `- **Ana TON:** \`${tonVal.toFixed(4)} TON\`\n` +
+                       `📦 *Jetonlar:*\n${jetonText}\n` +
+                       `- **İzlenen Havuz:** \`${knownPools.size}\``;
+
+        await bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+      }
     } catch (err) {
-      await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
+      try {
+        await bot.sendMessage(msg.chat.id, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
+      } catch (e) {}
     }
-  }
-});
+  });
+}
 
 async function checkAllPools() {
   try {
@@ -171,4 +182,13 @@ async function checkAllPools() {
 }
 
 initClient().then(() => {
-  setInterval
+  setInterval(checkAllPools, 15000);
+  checkAllPools();
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Yakalanamayan hata:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('Yakalanamayan Promise reddi:', err);
+});
