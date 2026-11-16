@@ -22,7 +22,7 @@ const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
 const TAKE_PROFIT_PCT = 35.0;
 const STOP_LOSS_PCT = -25.0;
-const SCAN_INTERVAL = 30000; // 30 saniye (GeckoTerminal 429 koruması için)
+const SCAN_INTERVAL = 30000; // 30 saniye
 
 let seenPools = {};
 let activePositions = {};
@@ -47,7 +47,7 @@ async function getWalletClient() {
     return { client, wallet: walletProvider, keyPair };
 }
 
-// Token / Havuz İsim Çözümleme Fonksiyonu (Örn: GBT/GRAM)
+// Token / Havuz İsim Çözümleme Fonksiyonu
 function getPoolDisplayName(pool, attributes) {
     if (attributes && attributes.name) return attributes.name;
     
@@ -69,7 +69,7 @@ async function fetchNewGramPools() {
         return response.data.data || [];
     } catch (error) {
         if (error.response && error.response.status === 429) {
-            console.warn("⚠️ GeckoTerminal 429 (Too Many Requests) alındı, 15 saniye bekleniyor...");
+            console.warn("⚠️ GeckoTerminal 429 alındı, 15 saniye bekleniyor...");
             await new Promise(resolve => setTimeout(resolve, 15000));
         } else {
             console.error("Havuz verisi çekme hatası:", error.message);
@@ -115,7 +115,6 @@ async function executeStonfiSwap(tokenAddress, amountGram) {
         return { success: false, error: err.message };
     }
 }
-
 // 4. Ana Sniper Döngüsü
 async function sniperWorker() {
     while (botRunning) {
@@ -199,7 +198,6 @@ bot.onText(/\/durdur/, (msg) => {
 });
 
 bot.onText(/\/durum/, (msg) => {
-    if (msg.from.id !== ALLOWED_USER_ID -> msg.from.id !== ALLOWED_USER_ID) return;
     if (msg.from.id !== ALLOWED_USER_ID) return;
     bot.sendMessage(msg.chat.id, `📊 Bot Durumu: ${botRunning ? 'Aktif 🟢' : 'Durduruldu 🔴'}\nAçık Pozisyon: ${Object.keys(activePositions).length}`, { parse_mode: "Markdown" });
 });
