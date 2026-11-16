@@ -164,20 +164,33 @@ if (bot) {
 function getPoolDisplayName(pool) {
   if (pool.symbol) return pool.symbol;
   if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
-  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) return `${pool.assets[0]}/${pool.assets[1]}`;
+  if (pool.token0_address && pool.token1_address) {
+    return `${pool.token0_address.substring(0, 4)}.../${pool.token1_address.substring(0, 4)}...`;
+  }
+  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
+    const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TOKEN';
+    const a1 = typeof pool.assets[1] === 'string' ? pool.assets[1].substring(0, 4) : 'TOKEN';
+    return `${a0}/${a1}`;
+  }
   if (pool.leftStock && pool.rightStock) return `${pool.leftStock}/${pool.rightStock}`;
   if (pool.address) return `Havuz (${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)})`;
   return "Yeni Token";
 }
 
 async function handleNewPool(pool) {
-  // Gelen havuz verisinin tam yapısını logluyoruz (Token ismini çözebilmek için)
-  console.log("Gelen Havuz Datası:", JSON.stringify(pool, null, 2));
-
   const poolAddress = pool.address;
   const dex = pool.dex || 'STON.fi';
   const tokenName = getPoolDisplayName(pool);
-  const liquidityUsd = Number(pool.lp_total_supply_usd || pool.liquidity_usd || pool.reserve0_usd || 0);
+  
+  // Likidite alanının olası tüm varyasyonları taranıyor ($0 çıkmasını engellemek için)
+  const liquidityUsd = Number(
+    pool.lp_total_supply_usd || 
+    pool.liquidity_usd || 
+    pool.reserve0_usd || 
+    pool.usd_price || 
+    pool.tvl_usd || 
+    0
+  );
 
   knownPools.add(poolAddress);
 
@@ -185,7 +198,7 @@ async function handleNewPool(pool) {
 
   setTimeout(async () => {
     try {
-      if (liquidityUsd < MIN_LIQUIDITY_USD) {
+      if (liquidityUsd > 0 && liquidityUsd < MIN_LIQUIDITY_USD) {
         await sendAlert(`❌ *[${tokenName}] İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
         return;
       }
