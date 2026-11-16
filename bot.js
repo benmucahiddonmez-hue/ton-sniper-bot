@@ -23,7 +23,7 @@ try {
 }
 
 let knownPools = new Set();
-let activePositions = new Map(); // Aktif alım yapılan coinler / havuzlar
+let activePositions = new Map();
 let isFirstRun = true;
 let tonClient = null;
 
@@ -140,39 +140,44 @@ if (bot) {
   });
 }
 
-// Yeni havuzları işleme alan ve 30 saniye kuralını uygulayan fonksiyon
+// Havuz bilgilerinden token isimlerini (örn: GRAM/TON) çıkaran yardımcı fonksiyon
+function getPoolDisplayName(pool) {
+  if (pool.symbol) return pool.symbol;
+  if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
+  if (pool.router_key) return pool.router_key;
+  return "Bilinmeyen Token";
+}
+
 async function handleNewPool(pool) {
   const poolAddress = pool.address;
   const dex = pool.dex || 'STON.fi';
-  const liquidityUsd = Number(pool.lp_total_supply_usd || pool.liquidity_usd || 0);
+  const tokenName = getPoolDisplayName(pool);
+  const liquidityUsd = Number(pool.lp_total_supply_usd || pool.liquidity_usd || pool.reserve0_usd || 0);
 
   knownPools.add(poolAddress);
 
-  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *${WAIT_TIME_SECONDS} saniye bekleniyor...*`);
+  await sendAlert(`🚨 *Yeni Havuz Tespit Edildi (${dex})!*\n🪙 Token: *${tokenName}*\n📍 Adres: \`${poolAddress}\`\n💧 İlk Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ *${WAIT_TIME_SECONDS} saniye bekleniyor...*`);
 
-  // 30 Saniye Bekleme Kuralı
-  setTimeout(async () =>  {
+  setTimeout(async () => {
     try {
-      // Güncel likiditeyi tekrar kontrol et (Rug veya ani değişimlere karşı)
-      // Eğer likidite 40$'ın altındaysa işlemi iptal et
       if (liquidityUsd < MIN_LIQUIDITY_USD) {
-        await sendAlert(`❌ *İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
+        await sendAlert(`❌ *[${tokenName}] İşlem İptal Edildi:* Likidite $40 altında kaldı ($${liquidityUsd.toFixed(2)}).`);
         return;
       }
 
-      await sendAlert(`🚀 *Süre doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
+      await sendAlert(`🚀 *[${tokenName}] Süre doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
 
-      // Burada otomatik alım (swap) tetiklenir ve pozisyon açılır
       activePositions.set(poolAddress, {
-        entryPrice: 1, // Simüle edilmiş başlangıç fiyatı
+        token: tokenName,
+        entryPrice: 1,
         amount: BUY_AMOUNT_TON,
         dex: dex
       });
 
-      await sendAlert(`✅ *Pozisyon Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
+      await sendAlert(`✅ *[${tokenName}] Pozisyon Açıldı!* (${BUY_AMOUNT_TON} TON harcandı)\n🎯 Hedef: %${TAKE_PROFIT_PCT} Kâr | 🛑 Stop: %${STOP_LOSS_PCT} Zarar`);
 
     } catch (err) {
-      await sendAlert(`❌ Alım sırasında hata oluştu: \`${err.message}\``);
+      await sendAlert(`❌ [${tokenName}] Alım sırasında hata: \`${err.message}\``);
     }
   }, WAIT_TIME_SECONDS * 1000);
 }
