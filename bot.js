@@ -11,7 +11,7 @@ const TG_CHAT_ID = "15658";
 const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
 const TONCENTER_KEY = "B2f1d3bc2a2894b4604fb615f47e3e0641c7a4b8a2ae76698f1c43938771d510";
 
-// true: gerçek işlem YOK, "kağıt üstünde" (paper) çalışır. İlk testleri böyle yap.
+// true: gercek islem YOK, test modu
 const DRY_RUN = true;
 
 const MIN_LIQUIDITY_USD = 40;      
@@ -33,7 +33,7 @@ let bot = null;
 try {
   bot = new TelegramBot(TG_TOKEN, { polling: true });
 } catch (e) {
-  console.error("Bot başlatılamadı:", e.message);
+  console.error("Bot baslatilamadi:", e.message);
 }
 
 let knownPools = new Set();
@@ -55,7 +55,7 @@ function loadState() {
     knownPools = new Set(s.knownPools || []);
     activePositions = new Map(Object.entries(s.positions || {}));
     if (knownPools.size > 0) isFirstRun = false;
-    console.log(`Durum yüklendi: ${knownPools.size} havuz, ${activePositions.size} pozisyon`);
+    console.log(`Durum yuklendi: ${knownPools.size} havuz, ${activePositions.size} pozisyon`);
   } catch (e) {}
 }
 
@@ -97,11 +97,11 @@ function httpGet(url, headers = {}) {
       res.on('data', (c) => data += c);
       res.on('end', () => {
         if (res.statusCode === 429) return reject(new Error('Request failed with status code 429'));
-        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('JSON parse hatası')); }
+        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('JSON parse hatasi')); }
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Zaman aşımı')); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('Zaman asimi')); });
   });
 }
 
@@ -111,7 +111,7 @@ async function sendAlert(message) {
     await bot.sendMessage(TG_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
   } catch (err) {
     try { await bot.sendMessage(TG_CHAT_ID, message.replace(/[*_`]/g, '')); }
-    catch (e2) { console.error('Telegram mesajı gönderilemedi:', e2.message); }
+    catch (e2) { console.error('Telegram mesaji gonderilemedi:', e2.message); }
   }
 }
 
@@ -129,13 +129,76 @@ async function initClient() {
     apiKey: TONCENTER_KEY
   });
   apiClient = new api.StonApiClient();
-  console.log("TON ve STON.fi istemcileri başlatıldı.");
+  console.log("TON ve STON.fi istemcileri baslatildi.");
 }
 
 async function getWallet() {
   if (walletCache) return walletCache;
   const words = MNEMONIC_PHRASE.trim().split(/\s+/);
-  if (words.length < 12) throw new Error(`Mnemonic eksik! (Bulunan: ${words.length} kelime)`); const keyPair = await mnemonicToPrivateKey(words); const wc = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey }); walletCache = { wallet: tonClient.open(wc), secretKey: keyPair.secretKey }; return walletCache; }  async function sendTx(txParams) { const { wallet, secretKey } = await getWallet(); const seqno = await retry(() => wallet.getSeqno()); await retry(() => wallet.sendTransfer({ seqno, secretKey, messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body, bounce: true })] })); for (let i = 0; i < 20; i++) { await sleep(3000); const cur = await retry(() => wallet.getSeqno()); if (cur > seqno) return true; } throw new Error('İşlem zincire girmedi (seqno artmadı)'); }  async function getJettonInfo(masterAddr) { const res = await retry(() => tonClient.runMethod(Address.parse(masterAddr), 'get_jetton_data')); const totalSupply = res.stack.readBigNumber(); const mintable = res.stack.readBigNumber() !== 0n; let admin = null; try { admin = res.stack.readAddressOpt(); } catch (e) { admin = null; } return { totalSupply, mintable, admin }; }  async function getJettonBalance(masterAddr, ownerAddress) { const r1 = await retry(() => tonClient.runMethod( Address.parse(masterAddr), 'get_wallet_address', [{ type: 'slice', cell: beginCell().storeAddress(ownerAddress).endCell() }] )); const jettonWallet = r1.stack.readAddress(); try { const r2 = await retry(() => tonClient.runMethod(jettonWallet, 'get_wallet_data')); return r2.stack.readBigNumber(); } catch (e) { return 0n; } }  function simulate(offerAddress, askAddress, offerUnits) { return retry(() => apiClient.simulateSwap({ offerAddress, askAddress, offerUnits: offerUnits.toString(), slippageTolerance: SLIPPAGE })); }  async function resolveToken(pool) { const cands = [pool.token0_address, pool.token1_address].filter(Boolean); for (const c of cands) { try { const sim = await simulate('ton', c, toNano(BUY_AMOUNT_TON.toString())); if (sim && sim.askUnits && BigInt(sim.askUnits) > 0n) return { token: c, sim }; } catch (e) { console.error(`resolveToken (${c.substring(0, 6)}...):`, e.message);
+  if (words.length < 12) throw new Error(`Mnemonic eksik! (Bulunan: ${words.length} kelime)`);
+  const keyPair = await mnemonicToPrivateKey(words);
+  const wc = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+  walletCache = { wallet: tonClient.open(wc), secretKey: keyPair.secretKey };
+  return walletCache;
+}
+
+async function sendTx(txParams) {
+  const { wallet, secretKey } = await getWallet();
+  const seqno = await retry(() => wallet.getSeqno());
+  await retry(() => wallet.sendTransfer({
+    seqno,
+    secretKey,
+    messages: [internal({ to: txParams.to, value: txParams.value, body: txParams.body, bounce: true })]
+  }));
+  for (let i = 0; i < 20; i++) {
+    await sleep(3000);
+    const cur = await retry(() => wallet.getSeqno());
+    if (cur > seqno) return true;
+  }
+  throw new Error('Islem zincire girmedi (seqno artmadi)');
+}
+
+async function getJettonInfo(masterAddr) {
+  const res = await retry(() => tonClient.runMethod(Address.parse(masterAddr), 'get_jetton_data'));
+  const totalSupply = res.stack.readBigNumber();
+  const mintable = res.stack.readBigNumber() !== 0n;
+  let admin = null;
+  try { admin = res.stack.readAddressOpt(); } catch (e) { admin = null; }
+  return { totalSupply, mintable, admin };
+}
+
+async function getJettonBalance(masterAddr, ownerAddress) {
+  const r1 = await retry(() => tonClient.runMethod(
+    Address.parse(masterAddr),
+    'get_wallet_address',
+    [{ type: 'slice', cell: beginCell().storeAddress(ownerAddress).endCell() }]
+  ));
+  const jettonWallet = r1.stack.readAddress();
+  try {
+    const r2 = await retry(() => tonClient.runMethod(jettonWallet, 'get_wallet_data'));
+    return r2.stack.readBigNumber();
+  } catch (e) {
+    return 0n; 
+  }
+}
+
+function simulate(offerAddress, askAddress, offerUnits) {
+  return retry(() => apiClient.simulateSwap({
+    offerAddress,
+    askAddress,
+    offerUnits: offerUnits.toString(),
+    slippageTolerance: SLIPPAGE
+  }));
+}
+
+async function resolveToken(pool) {
+  const cands = [pool.token0_address, pool.token1_address].filter(Boolean);
+  for (const c of cands) {
+    try {
+      const sim = await simulate('ton', c, toNano(BUY_AMOUNT_TON.toString()));
+      if (sim && sim.askUnits && BigInt(sim.askUnits) > 0n) return { token: c, sim };
+    } catch (e) {
+      console.error(`resolveToken (${c.substring(0, 6)}...):`, e.message);
     }
   }
   return null;
@@ -144,33 +207,33 @@ async function getWallet() {
 async function checkSafety(pool) {
   try {
     const resolved = await resolveToken(pool);
-    if (!resolved) return { safe: false, reason: "Token bulunamadı / simülasyon çalışmadı." };
+    if (!resolved) return { safe: false, reason: "Token bulunamadi / simulasyon calismadi." };
     const { token, sim } = resolved;
 
     const impact = Number(sim.priceImpact || 0);
     if (impact > MAX_PRICE_IMPACT) {
-      return { safe: false, reason: `Fiyat etkisi yüksek (%${(impact * 100).toFixed(1)}), likidite yetersiz.` };
+      return { safe: false, reason: `Fiyat etkisi yuksek (%${(impact * 100).toFixed(1)}), likidite yetersiz.` };
     }
 
     let info;
     try {
       info = await getJettonInfo(token);
     } catch (e) {
-      return { safe: false, reason: `Jeton verisi okunamadı: ${e.message}` };
+      return { safe: false, reason: `Jeton verisi okunamadi: ${e.message}` };
     }
     if (info.mintable && info.admin) {
-      return { safe: false, reason: "Yönetici hâlâ yeni jeton basabiliyor (mint yetkisi açık)." };
+      return { safe: false, reason: "Yonetici hala yeni jeton basabiliyor (mint yetkisi acik)." };
     }
 
     const sellSim = await simulate(token, 'ton', BigInt(sim.askUnits));
     const back = Number(BigInt(sellSim.askUnits)) / Number(toNano(BUY_AMOUNT_TON.toString()));
     if (back < MIN_ROUNDTRIP) {
-      return { safe: false, reason: `Al-sat simülasyonunda sadece %${(back * 100).toFixed(0)} geri dönüyor.` };
+      return { safe: false, reason: `Al-sat simulasyonunda sadece %${(back * 100).toFixed(0)} geri donuyor.` };
     }
 
     return { safe: true, token, sim, roundTrip: back, impact };
   } catch (err) {
-    return { safe: false, reason: `Güvenlik kontrolü başarısız: ${err.message}` };
+    return { safe: false, reason: `Guvenlik kontrolu basarisiz: ${err.message}` };
   }
 }
 
@@ -206,7 +269,7 @@ async function executeBuy(token, sim) {
       if (bal > 0n) break;
     }
     if (bal === 0n) {
-      return { success: false, error: "Tx gönderildi ama jeton bakiyesi görünmedi. Cüzdanı elle kontrol et!" };
+      return { success: false, error: "Tx gonderildi ama jeton bakiyesi gorunmedi." };
     }
     return { success: true, tokenAmount: bal };
   } catch (err) {
@@ -230,6 +293,215 @@ async function executeSell(pos) {
 
     const txParams = await router.getSwapJettonToTonTxParams({
       userWalletAddress: wallet.address.toString(),
+      offerJettonAddress: sim.offerAddress,
+      offerAmount: sim.offerUnits,
+      minAskAmount: sim.minAskUnits,
+      proxyTon
+    });
+
+    await sendTx(txParams);
+    return { success: true, tonOut };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function monitorPositions() {
+  if (isMonitoring || activePositions.size === 0) return;
+  isMonitoring = true;
+  try {
+    for (const [key, pos] of activePositions) {
+      try {
+        const sim = await simulate(pos.tokenAddress, 'ton', BigInt(pos.tokenAmount));
+        const value = Number(fromNano(BigInt(sim.askUnits)));
+        const pnl = ((value - pos.buyTon) / pos.buyTon) * 100;
+        pos.lastPnl = pnl;
+        pos.failCount = 0;
+
+        if (pnl >= TAKE_PROFIT_PCT || pnl <= -STOP_LOSS_PCT) {
+          const reason = pnl >= TAKE_PROFIT_PCT ? '🎯 Take Profit' : '🛑 Stop Loss';
+          const r = await enqueue(() => executeSell(pos));
+          if (r.success) {
+            activePositions.delete(key);
+            saveState();
+            await sendAlert(`${reason} *[${pos.token}]* satildi${DRY_RUN ? ' (TEST)' : ''}\nGiris: ${pos.buyTon} TON → Cikis: ${r.tonOut.toFixed(3)} TON (%${pnl.toFixed(1)})`);
+          } else {
+            await sendAlert(`❌ *[${pos.token}]* satim basarisiz: \`${r.error}\``);
+          }
+        }
+      } catch (e) {
+        pos.failCount = (pos.failCount || 0) + 1;
+        console.error(`Izleme hatasi [${pos.token}]:`, e.message);
+        if (pos.failCount === 3) {
+          await sendAlert(`⚠️ *[${pos.token}]* icin fiyat alinamiyor.`);
+        }
+      }
+      await sleep(1500);
+    }
+    saveState();
+  } finally {
+    isMonitoring = false;
+  }
+}
+
+if (bot) {
+  bot.on('message', async (msg) => {
+    try {
+      if (!msg || !msg.text) return;
+      if (String(msg.chat.id) !== String(TG_CHAT_ID)) return;
+      const text = msg.text.trim();
+
+      if (text === '/bakiye') {
+        const { wallet } = await getWallet();
+        const addr = wallet.address.toString({ bounceable: false });
+        const bal = await retry(() => tonClient.getBalance(wallet.address));
+        await bot.sendMessage(msg.chat.id,
+          `💰 *Cüzdan*\n\`${addr}\`\nTON: \`${Number(fromNano(bal)).toFixed(4)}\`\nAçık pozisyon: \`${activePositions.size}\`\nİzlenen havuz: \`${knownPools.size}\`\nMod: ${DRY_RUN ? 'TEST' : 'GERÇEK'}`,
+          { parse_mode: 'Markdown' });
+      }
+
+      if (text === '/pozisyonlar') {
+        if (activePositions.size === 0) return bot.sendMessage(msg.chat.id, 'Acik pozisyon yok.');
+        const lines = [...activePositions.values()].map(p =>
+          `- ${p.token}: ${p.buyTon} TON, PnL ${p.lastPnl !== undefined ? p.lastPnl.toFixed(1) + '%' : '?'}`);
+        await bot.sendMessage(msg.chat.id, lines.join('\n'));
+      }
+    } catch (err) {
+      console.error('Komut hatasi:', err.message);
+      try { await bot.sendMessage(msg.chat.id, `❌ Hata: ${err.message}`); } catch (e) {}
+    }
+  });
+}
+
+function getPoolDisplayName(pool) {
+  if (pool.symbol) return pool.symbol;
+  if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
+  if (pool.token0_address && pool.token1_address) {
+    return `${pool.token0_address.substring(0, 4)}/${pool.token1_address.substring(0, 4)}`;
+  }
+  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
+    const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TON';
+    const a1 = typeof pool.assets[1] === 'string' ? pool.assets[1].substring(0, 4) : 'TOKEN';
+    return `${a0}/${a1}`;
+  }
+  if (pool.address) return `Pool_${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)}`;
+  return "Yeni Token";
+}
+
+async function handleNewPool(pool) {
+  const poolAddress = pool.address;
+  const dex = pool.dex || 'STON.fi';
+  const tokenName = getPoolDisplayName(pool);
+
+  const liquidityUsd = Number(
+    pool.lp_total_supply_usd || pool.liquidity_usd || pool.reserve0_usd || pool.usd_price || pool.tvl_usd || 0
+  );
+
+  knownPools.add(poolAddress);
+
+  await sendAlert(`🚨 *Yeni Havuz (${dex})*\n🪙 *${tokenName}*\n📍 \`${poolAddress}\`\n💧 Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ ${WAIT_TIME_SECONDS} sn bekleniyor...`);
+
+  setTimeout(async () => {
+    try {
+      if (dex !== 'STON.fi') {
+        await sendAlert(`ℹ️ *[${tokenName}]* DeDust havuzu: otomatik alim desteklenmiyor.`);
+        return;
+      }
+
+      if (activePositions.size >= MAX_OPEN_POSITIONS) {
+        await sendAlert(`⏸️ *[${tokenName}]* atlandi: acik pozisyon limiti dolu.`);
+        return;
+      }
+
+      if (liquidityUsd > 0 && liquidityUsd < MIN_LIQUIDITY_USD) {
+        await sendAlert(`❌ *[${tokenName}]* iptal: likidite $${MIN_LIQUIDITY_USD} altinda.`);
+        return;
+      }
+
+      await sendAlert(`🛡️ *[${tokenName}]* guvenlik taramasi...`);
+      const safety = await checkSafety(pool);
+      if (!safety.safe) {
+        await sendAlert(`🚨 *[${tokenName}]* RISK, islem iptal.\nSebep: \`${safety.reason}\``);
+        return;
+      }
+
+      await sendAlert(`🚀 *[${tokenName}]* kontroller tamam. Alim siraya aliniyor...`);
+
+      const buy = await enqueue(() => executeBuy(safety.token, safety.sim));
+      if (!buy.success) {
+        await sendAlert(`❌ *[${tokenName}]* alim basarisiz: \`${buy.error}\``);
+        return;
+      }
+
+      activePositions.set(poolAddress, {
+        token: tokenName,
+        tokenAddress: safety.token,
+        poolAddress,
+        dex,
+        buyTon: BUY_AMOUNT_TON,
+        tokenAmount: buy.tokenAmount.toString(),
+        openedAt: Date.now()
+      });
+      saveState();
+
+      await sendAlert(`✅ *[${tokenName}]* pozisyon acildi${buy.dryRun ? ' (TEST)' : ''}! ${BUY_AMOUNT_TON} TON`);
+    } catch (err) {
+      console.error('handleNewPool hatasi:', err);
+      await sendAlert(`❌ [${tokenName}] hata: \`${err.message}\``);
+    }
+  }, WAIT_TIME_SECONDS * 1000);
+}
+
+async function scanDex(name, url, listPicker) {
+  try {
+    const data = await retry(() => httpGet(url));
+    const pools = listPicker(data);
+    if (!Array.isArray(pools)) return;
+    if (isFirstRun) {
+      pools.forEach(p => p && p.address && knownPools.add(p.address));
+      return;
+    }
+    for (const pool of pools) {
+      if (!pool || !pool.address || knownPools.has(pool.address)) continue;
+      pool.dex = name;
+      await handleNewPool(pool);
+    }
+  } catch (e) {
+    console.error(`${name} tarama hatasi:`, e.message);
+  }
+}
+
+async function checkAllPools() {
+  if (isPolling) return;
+  isPolling = true;
+  try {
+    await scanDex('STON.fi', 'https://api.ston.fi/v1/pools', d => d && (d.pool_list || d.pools || d));
+    await sleep(2000);
+    await scanDex('DeDust.io', 'https://api.dedust.io/v2/pools', d => d);
+
+    if (isFirstRun) {
+      isFirstRun = false;
+      await sendAlert(`✅ *Sniper Bot Aktif*\nMod: ${DRY_RUN ? 'TEST' : 'GERÇEK'}\nKomutlar: /bakiye /pozisyonlar`);
+    }
+    saveState();
+  } finally {
+    isPolling = false;
+  }
+}
+
+loadState();
+initClient().then(() => {
+  setInterval(checkAllPools, POLL_INTERVAL_MS);
+  setInterval(monitorPositions, MONITOR_INTERVAL_MS);
+  checkAllPools();
+}).catch(err => {
+  console.error('Baslatma hatasi:', err);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => console.error('Yakalanamayan hata:', err));
+process.on('unhandledRejection', (err) => console.error('Yakalanamayan Promise reddi:', err));
+alletAddress: wallet.address.toString(),
       offerJettonAddress: sim.offerAddress,
       offerAmount: sim.offerUnits,
       minAskAmount: sim.minAskUnits,
