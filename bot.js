@@ -1,10 +1,17 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 
-// Railway Environment Variables
+// ==========================================
+// RAILWAY ENVIRONMENT VARIABLES & AYARLAR
+// ==========================================
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const TONAPI_KEY = process.env.TONAPI_KEY;
+
+if (!TOKEN || !ALLOWED_USER_ID) {
+  console.error("HATA: TELEGRAM_TOKEN veya ALLOWED_USER_ID eksik! Railway Variables kısmını kontrol edin.");
+  process.exit(1);
+}
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
@@ -18,7 +25,7 @@ let seenPools = {};
 let activePositions = {};
 let botRunning = false;
 
-// 1. Yeni Havuzları Çekme
+// 1. Yeni Havuzları Çekme (GeckoTerminal)
 async function fetchNewGramPools() {
     try {
         const url = `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${GRAM_MASTER_ADDRESS}/pools?page=1`;
@@ -41,7 +48,7 @@ async function checkHoneypotAndSecurity(tokenAddress, poolAddress) {
             return { safe: false, reason: "Token kontrat bilgisi alınamadı." };
         }
         
-        // Burada ek alım/satım simülasyonları yapılabilir
+        // Buraya gerçek TVM simülasyonu veya ek kontroller eklenebilir
         return { safe: true, reason: "Güvenlik testleri başarılı." };
     } catch (error) {
         return { safe: false, reason: `Güvenlik testi hatası: ${error.message}` };
@@ -62,6 +69,7 @@ async function sniperWorker() {
         const pools = await fetchNewGramPools();
 
         for (const pool of pools) {
+            if (!pool || !pool.attributes) continue;
             const attrs = pool.attributes;
             const poolAddr = attrs.address;
             const liqUsd = parseFloat(attrs.reserve_in_usd || 0);
@@ -69,7 +77,7 @@ async function sniperWorker() {
             const baseTokenId = pool.relationships?.base_token?.data?.id || "";
             const tokenAddr = baseTokenId.replace("ton_", "");
 
-            if (tokenAddr === GRAM_MASTER_ADDRESS || activePositions[tokenAddr]) continue;
+            if (!tokenAddr || tokenAddr === GRAM_MASTER_ADDRESS || activePositions[tokenAddr]) continue;
 
             if (!seenPools[poolAddr]) {
                 seenPools[poolAddr] = { firstSeen: now, initialLiq: liqUsd, bought: false };
@@ -82,7 +90,11 @@ async function sniperWorker() {
 
             // Koşul: Likidite >= 40$ veya 1 dakika içinde 40$'a ulaştıysa
             if (liqUsd >= MIN_LIQUIDITY_USD && (elapsed <= 60 || poolInfo.initialLiq >= MIN_LIQUIDITY_USD)) {
-                bot.sendMessage(ALLOWED_USER_ID, `🔍 **Yeni Havuz Bulundu:** \`${tokenAddr}\` ($${liqUsd.toFixed(2)})`, { parse_mode: "Markdown" });
+                try {
+                    await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Yeni Havuz Bulundu:** \`${tokenAddr}\` ($${liqUsd.toFixed(2)})`, { parse_mode: "Markdown" });
+                } catch (e) {
+                    console.error("Telegram mesaj hatası:", e.message);
+                }
 
                 const security = await checkHoneypotAndSecurity(tokenAddr, poolAddr);
                 if (security.safe) {
@@ -90,11 +102,15 @@ async function sniperWorker() {
                     if (swapResult.success) {
                         poolInfo.bought = true;
                         activePositions[tokenAddr] = { entryPrice: swapResult.entryPrice, poolAddr: poolAddr, amount: 0.5 };
-                        bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!** Fiyat: $${swapResult.entryPrice}`, { parse_mode: "Markdown" });
+                        try {
+                            await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!** Fiyat: $${swapResult.entryPrice}`, { parse_mode: "Markdown" });
+                        } catch (e) {}
                     }
                 } else {
                     poolInfo.bought = true;
-                    bot.sendMessage(ALLOWED_USER_ID, `❌ **RİSKLİ (İptal):** ${security.reason}`, { parse_mode: "Markdown" });
+                    try {
+                        await bot.sendMessage(ALLOWED_USER_ID, `❌ **RİSKLİ (İptal):** ${security.reason}`, { parse_mode: "Markdown" });
+                    } catch (e) {}
                 }
             }
         }
@@ -103,7 +119,9 @@ async function sniperWorker() {
     }
 }
 
-// Telegram Komutları
+// ==========================================
+// TELEGRAM KOMUTLARI
+// ==========================================
 bot.onText(/\/baslat/, (msg) => {
     if (msg.from.id !== ALLOWED_USER_ID) return;
     if (!botRunning) {
@@ -121,158 +139,21 @@ bot.onText(/\/durdur/, (msg) => {
     bot.sendMessage(msg.chat.id, "🛑 Bot durduruldu.", { parse_mode: "Markdown" });
 });
 
-console.log("Node.js Telegram Bot dinlemede...");
-h(error => {
-      console.error("Zamanlanmış tarama hatası:", error.message);
-    });
-  }, POLL_INTERVAL_MS;
-
-  console.log(`Bot hazır. Tarama aralığı: ${POLL_INTERVAL_MS / 1000} saniye.`);
-}
-
-start().catch(error => {
-  console.error("Bot başlatılamadı:", error);
-  process.exit(1);
-});or => {
-  console.error("Beklenmeyen hata:", error);
+bot.onText(/\/durum/, (msg) => {
+    if (msg.from.id !== ALLOWED_USER_ID) return;
+    bot.sendMessage(msg.chat.id, `📊 Bot Durumu: ${botRunning ? 'Aktif 🟢' : 'Durduruldu 🔴'}\nAçık Pozisyon: ${Object.keys(activePositions).length}`, { parse_mode: "Markdown" });
 });
 
-// ==========================================
-// BAŞLAT
-// ==========================================
+console.log("Node.js Telegram Bot başarıyla başlatıldı ve dinlemede...");
 
-async function start() {
-  console.log("Sniper Bot başlatılıyor...");
-
-  loadState();
-
-  await checkAllPools();
-
-  setInterval(
-    checkAllPools,
-    POLL_INTERVAL_MS
-  );
-
-  console.log("Bot çalışıyor.");
-}
-
-start().catch(error => {
-  console.error("Başlatma hatası:", error.message);
-  process.exit(1);
+// Yakalanmayan Hata Korumaları
+process.on('uncaughtException', (err) => {
+  console.error('Yakalanamayan hata:', err);
 });
-   const txParams = await router.getSwapJettonToTonTxParams({
-      userWalletAddress: wallet.address.toString(),
-      offerJettonAddress: sim.offerAddress,
-      offerAmount: sim.offerUnits,
-      minAskAmount: sim.minAskUnits,
-      proxyTon
-    });
-
-    await sendTx(txParams);
-    return { success: true, tonOut };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-async function monitorPositions() {
-  if (isMonitoring || activePositions.size === 0) return;
-  isMonitoring = true;
-  try {
-    for (const [key, pos] of activePositions) {
-      try {
-        const sim = await simulate(pos.tokenAddress, 'ton', BigInt(pos.tokenAmount));
-        const value = Number(fromNano(BigInt(sim.askUnits)));
-        const pnl = ((value - pos.buyTon) / pos.buyTon) * 100;
-        pos.lastPnl = pnl;
-        pos.failCount = 0;
-
-        if (pnl >= TAKE_PROFIT_PCT || pnl <= -STOP_LOSS_PCT) {
-          const reason = pnl >= TAKE_PROFIT_PCT ? '🎯 Take Profit' : '🛑 Stop Loss';
-          const r = await enqueue(() => executeSell(pos));
-          if (r.success) {
-            activePositions.delete(key);
-            saveState();
-            await sendAlert(`${reason} *[${pos.token}]* satildi${DRY_RUN ? ' (TEST)' : ''}\nGiris: ${pos.buyTon} TON → Cikis: ${r.tonOut.toFixed(3)} TON (%${pnl.toFixed(1)})`);
-          } else {
-            await sendAlert(`❌ *[${pos.token}]* satim basarisiz: \`${r.error}\``);
-          }
-        }
-      } catch (e) {
-        pos.failCount = (pos.failCount || 0) + 1;
-        console.error(`Izleme hatasi [${pos.token}]:`, e.message);
-        if (pos.failCount === 3) {
-          await sendAlert(`⚠️ *[${pos.token}]* icin fiyat alinamiyor.`);
-        }
-      }
-      await sleep(1500);
-    }
-    saveState();
-  } finally {
-    isMonitoring = false;
-  }
-}
-
-if (bot) {
-  bot.on('message', async (msg) => {
-    try {
-      if (!msg || !msg.text) return;
-      if (String(msg.chat.id) !== String(TG_CHAT_ID)) return;
-      const text = msg.text.trim();
-
-      if (text === '/bakiye') {
-        const { wallet } = await getWallet();
-        const addr = wallet.address.toString({ bounceable: false });
-        const bal = await retry(() => tonClient.getBalance(wallet.address));
-        await bot.sendMessage(msg.chat.id,
-          `💰 *Cüzdan*\n\`${addr}\`\nTON: \`${Number(fromNano(bal)).toFixed(4)}\`\nAçık pozisyon: \`${activePositions.size}\`\nİzlenen havuz: \`${knownPools.size}\`\nMod: ${DRY_RUN ? 'TEST' : 'GERÇEK'}`,
-          { parse_mode: 'Markdown' });
-      }
-
-      if (text === '/pozisyonlar') {
-        if (activePositions.size === 0) return bot.sendMessage(msg.chat.id, 'Acik pozisyon yok.');
-        const lines = [...activePositions.values()].map(p =>
-          `- ${p.token}: ${p.buyTon} TON, PnL ${p.lastPnl !== undefined ? p.lastPnl.toFixed(1) + '%' : '?'}`);
-        await bot.sendMessage(msg.chat.id, lines.join('\n'));
-      }
-    } catch (err) {
-      console.error('Komut hatasi:', err.message);
-      try { await bot.sendMessage(msg.chat.id, `❌ Hata: ${err.message}`); } catch (e) {}
-    }
-  });
-}
-
-function getPoolDisplayName(pool) {
-  if (pool.symbol) return pool.symbol;
-  if (pool.token0_symbol && pool.token1_symbol) return `${pool.token0_symbol}/${pool.token1_symbol}`;
-  if (pool.token0_address && pool.token1_address) {
-    return `${pool.token0_address.substring(0, 4)}/${pool.token1_address.substring(0, 4)}`;
-  }
-  if (pool.assets && Array.isArray(pool.assets) && pool.assets.length >= 2) {
-    const a0 = typeof pool.assets[0] === 'string' ? pool.assets[0].substring(0, 4) : 'TON';
-    const a1 = typeof pool.assets[1] === 'string' ? pool.assets[1].substring(0, 4) : 'TOKEN';
-    return `${a0}/${a1}`;
-  }
-  if (pool.address) return `Pool_${pool.address.substring(0, 4)}...${pool.address.substring(pool.address.length - 4)}`;
-  return "Yeni Token";
-}
-
-async function handleNewPool(pool) {
-  const poolAddress = pool.address;
-  const dex = pool.dex || 'STON.fi';
-  const tokenName = getPoolDisplayName(pool);
-
-  const liquidityUsd = Number(
-    pool.lp_total_supply_usd || pool.liquidity_usd || pool.reserve0_usd || pool.usd_price || pool.tvl_usd || 0
-  );
-
-  knownPools.add(poolAddress);
-
-  await sendAlert(`🚨 *Yeni Havuz (${dex})*\n🪙 *${tokenName}*\n📍 \`${poolAddress}\`\n💧 Likidite: \`$${liquidityUsd.toFixed(2)}\`\n⏳ ${WAIT_TIME_SECONDS} sn bekleniyor...`);
-
-  setTimeout(async () => {
-    try {
-      if (dex !== 'STON.fi') {
+process.on('unhandledRejection', (err) => {
+  console.error('Yakalanamayan Promise reddi:', err);
+});
+f (dex !== 'STON.fi') {
         await sendAlert(`ℹ️ *[${tokenName}]* DeDust havuzu: otomatik alim desteklenmiyor.`);
         return;
       }
