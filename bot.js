@@ -7,9 +7,9 @@ const fs = require('fs');
 
 // ================= AYARLAR (Dolduruldu) =================
 const TG_TOKEN = "9161821033:AAGJuqOFm0YeaQ57DgSagjGB6eSfw-8Xc7k";
-const TG_CHAT_ID = "15658"; // Sadece bu sohbet komut verebilir
+const TG_CHAT_ID = "7511782761"; // Sadece bu sohbet komut verebilir
 const MNEMONIC_PHRASE = "Dignity artefact rapid catalog wool lounge arctic cricket grocery best cause garbage message rapid artwork sphere hybrid mass harbor spell prize walnut pink ethics";
-const TONCENTER_KEY = "fa0dcf2b6a22aa02db88e34f19b22e1b12b32279165b4c19ef6d48342795fbb0"; // Toncenter API Key eklendi
+const TONCENTER_KEY = "B2f1d3bc2a2894b4604fb615f47e3e0641c7a4b8a2ae76698f1c43938771d510"; // Toncenter API Key eklendi
 
 // true: gerçek işlem YOK, "kağıt üstünde" (paper) çalışır. İlk testleri böyle yap.
 const DRY_RUN = true;
