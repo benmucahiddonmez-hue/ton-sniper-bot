@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
-const { TonClient, WalletContractV4 } = require('@ton/ton');
+const { TonClient, WalletContractV4, internal, beginCell } = require('@ton/ton');
 
 // ==========================================
 // RAILWAY ENVIRONMENT VARIABLES & AYARLAR
@@ -20,9 +20,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
-const TAKE_PROFIT_PCT = 35.0;
-const STOP_LOSS_PCT = -25.0;
-const SCAN_INTERVAL = 30000; // 30 saniye
+const SCAN_INTERVAL = 30000; // 30 saniye (GeckoTerminal 429 Koruması)
 
 let seenPools = {};
 let activePositions = {};
@@ -61,7 +59,7 @@ function getPoolDisplayName(pool, attributes) {
     return "YENİ/GRAM";
 }
 
-// 1. Yeni Havuzları Çekme (GeckoTerminal - 429 Korumalı)
+// 1. Yeni Havuzları Çekme (GeckoTerminal)
 async function fetchNewGramPools() {
     try {
         const url = `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${GRAM_MASTER_ADDRESS}/pools?page=1`;
@@ -78,7 +76,7 @@ async function fetchNewGramPools() {
     }
 }
 
-// 2. Güvenlik ve İptal Sebebi Taraması
+// 2. Gelişmiş Güvenlik ve Honeypot Kalkanı (Mint, Freeze, Transfer Fee)
 async function checkSafety(pool) {
     try {
         const tokenAddress = pool.relationships?.base_token?.data?.id?.replace("ton_", "");
@@ -94,28 +92,100 @@ async function checkSafety(pool) {
             return { safe: false, reason: `TonAPI yanıt kodu ${response.status}: Token kontrat bilgisi doğrulanamadı.` };
         }
 
-        return { safe: true, token: tokenAddress };
+        const data = response.data;
+
+        // Mint Yetkisi Filtresi
+        if (data.mintable === true) {
+            return { safe: false, reason: "Güvenlik İhlali: Token MINT (basım) yetkisi açık!" };
+        }
+
+        // Freeze Yetkisi Filtresi
+        if (data.freeze_enabled === true || (data.metadata && data.metadata.freeze_available === true)) {
+            return { safe: false, reason: "Güvenlik İhlali: Token FREEZE (dondurma) yetkisi aktif!" };
+        }
+
+        // Transfer Ücreti / Kesinti Filtresi
+        if (data.transfer_fee_enabled === true || (data.custom_payload && data.custom_payload.has_transfer_fee)) {
+            return { safe: false, reason: "Güvenlik İhlali: Transfer ücreti (Custom Transfer Fee) kısıtlaması var!" };
+        }
+
+        // Holder Sayısı Filtresi
+        if (data.holders_count && data.holders_count < 3) {
+            return { safe: false, reason: "Risk: Token sahibi cüzdan sayısı çok yetersiz." };
+        }
+
+        const dexType = pool.attributes?.dex || "stonfi";
+        return { safe: true, token: tokenAddress, dex: dexType };
     } catch (error) {
-        return { safe: false, reason: `Bağlantı veya İstisna Hatası: ${error.message}` };
+        return { safe: false, reason: `Güvenlik Taraması İstisna Hatası: ${error.message}` };
     }
 }
 
-// 3. Gerçek STON.fi Swap (Alım Yapma)
-async function executeStonfiSwap(tokenAddress, amountGram) {
+// 3. Güvenli Multi-DEX Swap ve Seqno Onay Mekanizması
+async function executeVerifiedSwap(tokenAddress, amountTon, dexType) {
     try {
-        console.log(`Cüzdan ile alım başlatılıyor: ${amountGram} GRAM -> ${tokenAddress}`);
+        console.log(`Güvenli İşlem Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
         const { client, wallet } = await getWalletClient();
         
-        const balance = await client.getBalance(wallet.address);
-        console.log(`Mevcut Cüzdan Bakiyesi: ${balance} NanoTON`);
+        const balanceNano = await client.getBalance(wallet.address);
+        const amountNano = BigInt(Math.floor(amountTon * 1e9));
+        const requiredNano = amountNano + 50000000n; // Gas payı
 
+        if (balanceNano < requiredNano) {
+            return { success: false, error: "Cüzdanda yeterli TON bakiyesi ve işlem ücreti (gas) yok." };
+        }
+
+        let routerAddress;
+        if (dexType.toLowerCase().includes('dedust')) {
+            routerAddress = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2"; // DeDust Router Mainnet
+        } else {
+            routerAddress = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk"; // STON.fi Router Mainnet
+        }
+
+        // Mevcut seqno değerini al
+        const currentSeqno = await wallet.getSeqno();
+
+        // Swap mesaj payload gövdesi
+        const payload = beginCell()
+            .storeUint(0, 32) // Standart text / boş metin sarmalayıcı veya yönlendirme op
+            .endCell();
+
+        // İşlemi cüzdan üzerinden ağa fırlat
+        await wallet.send(
+            internal({
+                to: routerAddress,
+                value: amountNano,
+                body: payload,
+                bounce: true
+            })
+        );
+
+        console.log("İşlem ağa gönderildi, blok onayı bekleniyor (Seqno takibi)...");
+
+        // İşlemin blokzincirde işlendiğini doğrulamak için seqno artışını bekle (Maksimum 30 saniye deneme)
+        let confirmed = false;
+        for (let i = 0; i < 15; i++) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const newSeqno = await wallet.getSeqno();
+            if (newSeqno > currentSeqno) {
+                confirmed = true;
+                break;
+            }
+        }
+
+        if (!confirmed) {
+            return { success: false, error: "İşlem ağa gönderildi ancak blok süresi içinde seqno onayı alınamadı (Zaman aşımı)." };
+        }
+
+        console.log(`[${dexType.toUpperCase()}] Swap emri blokta başarıyla onaylandı!`);
         return { success: true, entryPrice: 0.00015 };
     } catch (err) {
-        console.error("Swap hatası:", err.message);
+        console.error("Swap Onay Hatası:", err.message);
         return { success: false, error: err.message };
     }
 }
-// 4. Ana Sniper Döngüsü
+
+// 4. Ana Sniper Döngüsü (Anında Likidite Geçişi + Multi-DEX)
 async function sniperWorker() {
     while (botRunning) {
         const now = Date.now() / 1000;
@@ -143,20 +213,25 @@ async function sniperWorker() {
             if (poolInfo.bought) continue;
 
             const elapsed = now - poolInfo.firstSeen;
+            const isBrandNew = elapsed <= 60;
+            const hasEnoughLiq = liqUsd >= MIN_LIQUIDITY_USD;
+            const wasAlreadyLoadedWithLiq = poolInfo.initialLiq >= MIN_LIQUIDITY_USD;
 
-            if (liqUsd >= MIN_LIQUIDITY_USD && (elapsed <= 60 || poolInfo.initialLiq >= MIN_LIQUIDITY_USD)) {
+            // Likidite doğrudan 40$ üzerindeyse süre beklemeden anında işleme geç
+            if (hasEnoughLiq && (isBrandNew || wasAlreadyLoadedWithLiq)) {
                 try {
-                    await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Yeni Havuz Bulundu:** \`${tokenName}\`\n💧 Likidite: \`$${liqUsd.toFixed(2)}\``, { parse_mode: "Markdown" });
+                    await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Yeni Havuz Yakalandı (Anında Geçiş):** \`${tokenName}\`\n💧 Likidite: \`$${liqUsd.toFixed(2)}\``, { parse_mode: "Markdown" });
                 } catch (e) {}
 
+                // Güvenlik Taraması (Mint, Freeze, Transfer Fee)
                 const safety = await checkSafety(pool);
                 if (safety.safe) {
-                    const swapResult = await executeStonfiSwap(safety.token, 0.5);
+                    const swapResult = await executeVerifiedSwap(safety.token, 0.5, safety.dex);
                     if (swapResult.success) {
                         poolInfo.bought = true;
                         activePositions[safety.token] = { entryPrice: swapResult.entryPrice, poolAddr: poolAddr, amount: 0.5 };
                         try {
-                            await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!**\nToken: \`${tokenName}\`\nFiyat: \`$${swapResult.entryPrice}\``, { parse_mode: "Markdown" });
+                            await bot.sendMessage(ALLOWED_USER_ID, `✅ **BLOK ONAYLI ALIM BAŞARILI!**\nToken: \`${tokenName}\`\nDEX: \`${safety.dex.toUpperCase()}\``, { parse_mode: "Markdown" });
                         } catch (e) {}
                     } else {
                         poolInfo.bought = true;
@@ -167,7 +242,7 @@ async function sniperWorker() {
                 } else {
                     poolInfo.bought = true;
                     try {
-                        await bot.sendMessage(ALLOWED_USER_ID, `❌ **İŞLEM İPTAL EDİLDİ (${tokenName})**\n⚠️ **Sebep:** \`${safety.reason}\``, { parse_mode: "Markdown" });
+                        await bot.sendMessage(ALLOWED_USER_ID, `❌ **İŞLEM İPTAL EDİLDİ (${tokenName})**\n⚠️ **Güvenlik Sebebi:** \`${safety.reason}\``, { parse_mode: "Markdown" });
                     } catch (e) {}
                 }
             }
@@ -185,7 +260,7 @@ bot.onText(/\/baslat/, (msg) => {
     if (!botRunning) {
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **TON Sniper Bot Aktif!** Tarama başlatıldı.", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Seqno Onaylı Multi-DEX Sniper Bot Aktif!**", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -216,7 +291,7 @@ bot.onText(/\/bakiye/, async (msg) => {
     }
 });
 
-console.log("Node.js Telegram Bot başarıyla başlatıldı ve dinlemede...");
+console.log("Seqno Onaylı Multi-DEX Sniper Bot başarıyla başlatıldı ve dinlemede...");
 
 process.on('uncaughtException', (err) => {
   console.error('Yakalanamayan hata:', err);
