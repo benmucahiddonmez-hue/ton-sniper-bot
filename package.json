@@ -1,14 +1,11 @@
 {
-  "name": "ton-sniper-bot",
+  "name": "ton-pool-monitor",
   "version": "1.0.0",
-  "main": "bot.js",
+  "main": "main.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node main.js"
   },
   "dependencies": {
-    "@ston-fi/sdk": "^2.1.0",
-    "@ton/crypto": "^3.3.0",
-    "@ton/ton": "^15.1.0",
     "node-telegram-bot-api": "^0.66.0"
   }
 }
