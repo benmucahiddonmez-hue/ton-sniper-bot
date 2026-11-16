@@ -1,7 +1,7 @@
 {
   "name": "ton-sniper-bot",
   "version": "1.0.0",
-  "description": "Multi-DEX TON Sniper Bot with Security Shield",
+  "description": "Production-Ready Multi-DEX TON Sniper Bot with DEX-Specific Swap Payloads and MongoDB Persistence",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
@@ -10,6 +10,7 @@
     "@ton/crypto": "^3.2.0",
     "@ton/ton": "^15.0.0",
     "axios": "^1.7.9",
+    "mongodb": "^6.3.0",
     "node-telegram-bot-api": "^0.66.0"
   },
   "engines": {
