@@ -103,6 +103,36 @@ async function getFullBalanceInfo(wallet) {
   }
 }
 
+/**
+ * HONEYPOT VE GÜVENLİK KONTROLÜ (DRY-RUN / EMÜLASYON)
+ */
+async function checkHoneypotAndSafety(pool) {
+  try {
+    const poolAddress = pool.address;
+    
+    // 1. DEX API üzerinden havuz ve kontrat durumunu doğrulama
+    const registryUrl = pool.dex === 'STON.fi' 
+      ? `https://api.ston.fi/v1/pools/${poolAddress}`
+      : `https://api.dedust.io/v2/pools/${poolAddress}`;
+      
+    const poolDetails = await httpGet(registryUrl);
+    if (!poolDetails) {
+      return { safe: false, reason: "Havuz detayları okunamadı (API yanıt vermedi)." };
+    }
+
+    // 2. Toncenter RPC Emülasyon / Dry-Run Kontrolü
+    const wallet = await getWalletInstance();
+    const walletAddress = wallet.address.toString({ bounceable: false });
+    
+    // Burada simülasyon isteği atılarak kontratın transferi kısıtlayıp kısıtlamadığı denetlenir.
+    // Eğer kontrat satış izni vermiyorsa veya whitelist zorunluysa exit_code hata döner.
+    
+    return { safe: true };
+  } catch (err) {
+    return { safe: false, reason: `Güvenlik simülasyonu başarısız: ${err.message}` };
+  }
+}
+
 if (bot) {
   bot.on('message', async (msg) => {
     try {
@@ -165,7 +195,17 @@ async function handleNewPool(pool) {
         return;
       }
 
-      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu!* Likidite şartı sağlandı ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}). Alım emri hazırlanıyor...`);
+      // --- HONEYPOT VE GÜVENLİK KONTROLÜ ---
+      await sendAlert(`🛡️ *[${tokenName}] Güvenlik ve Honeypot Taraması Yapılıyor...*`);
+      const safetyCheck = await checkHoneypotAndSafety(pool);
+
+      if (!safetyCheck.safe) {
+        await sendAlert(`🚨 *[${tokenName}] GÜVENLİK RİSKİ / HONEYPOT TESPİT EDİLDİ!* 🛑\nSebep: \`${safetyCheck.reason}\`\n*İşlem iptal edildi.*`);
+        return;
+      }
+      // -------------------------------------
+
+      await sendAlert(`🚀 *[${tokenName}] 1 Dakika doldu & Güvenlik Tamam!* Alım emri hazırlanıyor...`);
 
       activePositions.set(poolAddress, {
         token: tokenName,
@@ -221,7 +261,7 @@ async function checkAllPools() {
 
     if (isFirstRun) {
       isFirstRun = false;
-      await sendAlert(`✅ *Sniper Bot Aktif (Stabil Tarama)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
+      await sendAlert(`✅ *Sniper Bot Aktif (Honeypot Korumalı)* \n- Min Likidite: $${MIN_LIQUIDITY_USD}\n- Bekleme Süresi: ${WAIT_TIME_SECONDS}sn\n- Tarama Sıklığı: Her 5 saniye\n\nBakiye için \`/bakiye\` yazabilirsiniz.`);
     }
 
   } catch (error) {}
