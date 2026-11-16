@@ -1,12 +1,17 @@
 {
   "name": "ton-sniper-bot",
   "version": "1.0.0",
-  "description": "TON Gram Sniper Telegram Bot",
+  "description": "TON Gram Sniper Telegram Bot in Node.js",
   "main": "bot.js",
   "scripts": {
-    "start": "python bot.py"
+    "start": "node bot.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "axios": "^1.7.9",
+    "node-telegram-bot-api": "^0.66.0",
+    "@ton/ton": "^15.0.0",
+    "@ton/crypto": "^3.3.0"
+  },
   "engines": {
     "node": "20.x"
   }
