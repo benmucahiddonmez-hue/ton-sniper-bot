@@ -59,23 +59,33 @@ async function getWalletInstance() {
   return tonClient.open(wallet);
 }
 
-async function getGramBalance(walletAddress) {
+// Hem Ana TON hem de tüm jetonları detaylı çeken fonksiyon
+async function getFullBalanceInfo(wallet) {
   try {
+    // 1. Ana TON bakiyesi
+    const balanceNano = await tonClient.getBalance(wallet.address);
+    const tonBalance = Number(balanceNano) / 1e9;
+
+    // 2. Jeton bakiyeleri
+    const walletAddress = wallet.address.toString({ bounceable: false });
     const url = `https://toncenter.com/api/v2/getAccountJettons?address=${walletAddress}`;
     const data = await httpGet(url);
     
+    let jetonsList = [];
     if (data && data.ok && Array.isArray(data.result)) {
       for (const j of data.result) {
-        const symbol = j.symbol || (j.metadata && j.metadata.symbol) || '';
+        const symbol = j.symbol || (j.metadata && j.metadata.symbol) || 'JETON';
         const balance = j.balance ? Number(j.balance) / 1e9 : 0;
-        
-        if (symbol.toUpperCase().includes('GRAM') || balance > 0) {
-          return { symbol: symbol || 'GRAM', balance: balance };
+        if (balance > 0) {
+          jetonsList.push(`- ${balance.toFixed(4)} ${symbol}`);
         }
       }
     }
-  } catch (e) {}
-  return { symbol: 'GRAM', balance: 0 };
+
+    return { ton: tonBalance, jetons: jetonsList };
+  } catch (e) {
+    return { ton: 0, jetons: [] };
+  }
 }
 
 bot.on('message', async (msg) => {
@@ -90,9 +100,17 @@ bot.on('message', async (msg) => {
 
       await bot.sendMessage(chatId, `🔍 Cüzdan taranıyor...\n\`${walletAddress}\``, { parse_mode: 'Markdown' });
 
-      const assetInfo = await getGramBalance(walletAddress);
+      const info = await getFullBalanceInfo(wallet);
       
-      await bot.sendMessage(chatId, `💰 *Cüzdan Bakiye Raporu*\n- **Adres:** \`${walletAddress}\`\n- **Bakiye:** \`${assetInfo.balance.toFixed(4)} ${assetInfo.symbol}\`\n- **İzlenen Havuz:** \`${knownPools.size}\``, { parse_mode: 'Markdown' });
+      let jetonText = info.jettons.length > 0 ? info.jettons.join('\n') : "- Hiç jeton bulunamadı";
+      
+      const report = `💰 *Cüzdan Bakiye Raporu*\n` +
+                     `- **Adres:** \`${walletAddress}\`\n` +
+                     `- **Ana TON:** \`${info.ton.toFixed(4)} TON\`\n` +
+                     `📦 *Jetonlar:*\n${jetonText}\n` +
+                     `- **İzlenen Havuz:** \`${knownPools.size}\``;
+
+      await bot.sendMessage(chatId, report, { parse_mode: 'Markdown' });
     } catch (err) {
       await bot.sendMessage(chatId, `❌ Bakiye okunurken hata: \`${err.message}\``, { parse_mode: 'Markdown' });
     }
