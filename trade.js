@@ -1,5 +1,6 @@
 // trade.js - SDK Tabanlı Gerçek İşlem, Quote ve Doğrulama Modülü
 require('dotenv').config();
+const { Address } = require('@ton/core');
 const { TonClient, WalletContractV4, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { StonApiClient } = require('@ston-fi/api');
@@ -39,14 +40,66 @@ async function getCtx() {
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
     try {
         const tonapiKey = process.env.TONAPI_KEY;
-        const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
-        const res = await axios.get(`https://tonapi.io/v2/accounts/${walletAddress.toString()}/jettons`, { headers, timeout: 5000 });
+
+        const headers = tonapiKey
+            ? { Authorization: `Bearer ${tonapiKey}` }
+            : {};
+
+        const wallet = Address.parse(
+            walletAddress.toString()
+        ).toRawString();
+
+        const targetToken = Address.parse(
+            tokenAddress.toString()
+        ).toRawString();
+
+        const res = await axios.get(
+            `https://tonapi.io/v2/accounts/${wallet}/jettons`,
+            {
+                headers,
+                timeout: 10000
+            }
+        );
+
         const balances = res.data?.balances || [];
-        const found = balances.find(j => j.jetton.address.toLowerCase() === tokenAddress.toLowerCase());
-        return found ? BigInt(found.balance) : 0n;
+
+        const found = balances.find((j) => {
+            try {
+                const jettonAddress = Address.parse(
+                    j.jetton.address
+                ).toRawString();
+
+                return jettonAddress === targetToken;
+            } catch (e) {
+                return false;
+            }
+        });
+
+        if (!found) {
+            console.log('GRAM jetton bulunamadı.');
+            console.log('Aranan adres:', targetToken);
+            console.log(
+                'Cüzdandaki jetton adresleri:',
+                balances.map(j => j.jetton?.address)
+            );
+
+            return 0n;
+        }
+
+        console.log(
+            'GRAM ham bakiye:',
+            found.balance
+        );
+
+        return BigInt(found.balance);
+
     } catch (err) {
-        console.error("Jetton bakiye okuma hatası:", err.message);
-        return 0n;
+        console.error(
+            'Jetton bakiye okuma hatası:',
+            err.response?.data || err.message
+        );
+
+        throw err;
     }
 }
 
