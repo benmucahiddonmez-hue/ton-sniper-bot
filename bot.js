@@ -1,4 +1,4 @@
-// bot.js - Kesinleştirilmiş, State Reconciliation ve STON.fi v2 Uyumlu Production Botu
+// bot.js - Tam Entegre, State Reconciliation ve Gram/TON Bilgili Production Botu
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -9,6 +9,9 @@ const { buy, sell, sellValueNano, buyImpactPct, getWalletJettonBalance, getCtx }
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const MONGODB_URI = process.env.MONGODB_URI;
+
+// Gram jetonunun STON.fi / TonAPI üzerindeki master adresi
+const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 
 if (!TOKEN || !ALLOWED_USER_ID) {
   console.error("HATA: TELEGRAM_TOKEN veya ALLOWED_USER_ID eksik!");
@@ -71,6 +74,34 @@ async function updateTonPrice() {
     console.error("TON fiyat güncelleme hatası:", error.message);
     return false;
   }
+}
+
+// Cüzdan TON, Gram Bakiye ve STON.fi Gram Fiyatını Çeken Yardımcı Fonksiyon
+async function getWalletAndGramStats(walletAddress) {
+    try {
+        const { client, stonApi } = await getCtx();
+        
+        // 1. Yerel TON Bakiyesi
+        const balanceNano = await client.getBalance(walletAddress);
+        const balanceTon = Number(balanceNano) / 1e9;
+
+        // 2. Gram (Jetton) Bakiyesi
+        const gramRawBalance = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS);
+        const gramBalance = Number(gramRawBalance) / 1e9;
+
+        // 3. STON.fi Üzerinden Gram Fiyatı ($ cinsinden)
+        let gramPriceUsd = 0;
+        try {
+            const asset = await stonApi.getAsset(GRAM_MASTER_ADDRESS);
+            gramPriceUsd = Number(asset?.dexPriceUsd ?? asset?.dexUsdPrice ?? 1.05);
+        } catch (e) {
+            gramPriceUsd = 1.05; // Fallback fiyat
+        }
+
+        return { balanceTon, gramBalance, gramPriceUsd };
+    } catch (err) {
+        return { balanceTon: 0, gramBalance: 0, gramPriceUsd: 1.05 };
+    }
 }
 
 // State Reconciliation (Durum Senkronizasyonu)
@@ -332,6 +363,7 @@ async function sniperWorker() {
   }
 }
 
+// /baslat Komutu
 bot.onText(/\/baslat/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   if (!botRunning) {
@@ -340,11 +372,20 @@ bot.onText(/\/baslat/, async (msg) => {
       await updateTonPrice();
       await initDatabase();
 
-      const { client, wallet } = await getCtx();
-      const balanceTon = Number(await client.getBalance(wallet.address)) / 1e9;
+      const { wallet } = await getCtx();
+      const stats = await getWalletAndGramStats(wallet.address);
 
       botRunning = true;
-      bot.sendMessage(msg.chat.id, `🚀 **Yerel TON Sniper Bot Başlatıldı!**\nBakiye: \`${balanceTon.toFixed(2)} TON\``, { parse_mode: "Markdown" });
+      bot.sendMessage(
+        msg.chat.id, 
+        `🚀 **Yerel TON Sniper Bot Başlatıldı!**\n\n` +
+        `🟢 **Durum:** Aktif Çalışıyor\n` +
+        `💰 **TON Bakiye:** \`${stats.balanceTon.toFixed(2)} TON\`\n` +
+        `🪙 **Gram Bakiye:** \`${stats.gramBalance.toLocaleString()} GRAM\`\n` +
+        `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(2)}\``, 
+        { parse_mode: "Markdown" }
+      );
+      
       sniperWorker();
     } catch (e) {
       bot.sendMessage(msg.chat.id, `❌ Başlatma Hatası: \`${e.message}\``);
@@ -352,6 +393,7 @@ bot.onText(/\/baslat/, async (msg) => {
   }
 });
 
+// /durdur Komutu
 bot.onText(/\/durdur/, (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   botRunning = false;
@@ -361,12 +403,21 @@ bot.onText(/\/durdur/, (msg) => {
   });
 });
 
+// /bakiye Komutu
 bot.onText(/\/bakiye/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   try {
-    const { client, wallet } = await getCtx();
-    const balanceTon = Number(await client.getBalance(wallet.address)) / 1e9;
-    bot.sendMessage(msg.chat.id, `💰 **Bakiye:** \`${balanceTon.toFixed(4)} TON\``, { parse_mode: "Markdown" });
+    const { wallet } = await getCtx();
+    const stats = await getWalletAndGramStats(wallet.address);
+
+    bot.sendMessage(
+      msg.chat.id, 
+      `💰 **Cüzdan Durumu:**\n\n` +
+      `🔹 **TON Bakiye:** \`${stats.balanceTon.toFixed(4)} TON\`\n` +
+      `🔹 **Gram Bakiye:** \`${stats.gramBalance.toLocaleString()} GRAM\`\n` +
+      `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(2)}\``, 
+      { parse_mode: "Markdown" }
+    );
   } catch (error) {
     bot.sendMessage(msg.chat.id, `❌ Hata: \`${error.message}\``);
   }
