@@ -1,4 +1,4 @@
-// bot.js - Tam Entegre, State Reconciliation ve Gram/TON Bilgili Production Botu
+// bot.js - Gram ve Fiyat Bilgileri Tam Entegre Edilmiş Son Hali
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -363,7 +363,7 @@ async function sniperWorker() {
   }
 }
 
-// /baslat Komutu
+// /baslat Komutu (Gram ve Fiyat Göstergeli)
 bot.onText(/\/baslat/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   if (!botRunning) {
@@ -403,7 +403,7 @@ bot.onText(/\/durdur/, (msg) => {
   });
 });
 
-// /bakiye Komutu
+// /bakiye Komutu (Gram ve Fiyat Göstergeli)
 bot.onText(/\/bakiye/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   try {
