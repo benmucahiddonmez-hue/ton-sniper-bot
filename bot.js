@@ -681,17 +681,23 @@ bot.onText(/\/baslat/, async (msg) => {
         throw new Error('GRAM fiyatı doğrulanamadı. Bot başlatılmadı.');
       }
 
-      const { client, wallet } = await getCtx();
-      const balanceTon =
-        Number(await client.getBalance(wallet.address)) / 1e9;
+      const { wallet } = await getCtx();
 
-      botRunning = true;
+const rawGramBalance = await getWalletJettonBalance(
+  wallet.address,
+  GRAM_MASTER_ADDRESS
+);
 
-      await bot.sendMessage(
-        msg.chat.id,
-        `🚀 **Production Sniper Bot Başlatıldı!**\nBakiye: \`${balanceTon.toFixed(2)} TON\`\nGRAM: \`$${GRAM_PRICE_USD}\``,
-        { parse_mode: 'Markdown' }
-      );
+const gramBalance =
+  Number(rawGramBalance) / Math.pow(10, GRAM_DECIMALS);
+
+botRunning = true;
+
+await bot.sendMessage(
+  msg.chat.id,
+  `🚀 **Production Sniper Bot Başlatıldı!**\nBakiye: \`${gramBalance.toFixed(3)} GRAM\`\nGRAM: \`$${GRAM_PRICE_USD.toFixed(3)}\``,
+  { parse_mode: 'Markdown' }
+);
 
       sniperWorker().catch((err) => {
         console.error('Sniper worker beklenmeyen hata:', err.message);
