@@ -29,23 +29,35 @@ let activePositions = {};
 let botRunning = false;
 
 // MongoDB Kalıcılık Altyapısı
-let dbClient, positionsCollection;
+let dbClient, positionsCollection, seenPoolsCollection;
+
 async function initDatabase() {
     if (!MONGODB_URI) {
-        console.warn("⚠️ MONGODB_URI tanımlanmamış! Pozisyonlar bellek üzerinde çalışacak.");
+        console.warn("⚠️ MONGODB_URI tanımlanmamış! Veriler bellek üzerinde çalışacak.");
         return;
     }
     try {
-        dbClient = new MongoClient(MONGODB_URI);
+        dbClient = new MongoClient(MONGODB_URI, { tlsAllowInvalidCertificates: true });
         await dbClient.connect();
         const db = dbClient.db("ton_sniper_db");
-        positionsCollection = db.collection("positions");
         
-        const saved = await positionsCollection.find({}).toArray();
-        saved.forEach(p => {
+        positionsCollection = db.collection("positions");
+        seenPoolsCollection = db.collection("seen_pools");
+        
+        // Aktif pozisyonları yükle
+        const savedPos = await positionsCollection.find({}).toArray();
+        savedPos.forEach(p => {
             activePositions[p.tokenAddress] = p;
         });
-        console.log(`✅ MongoDB'den ${saved.length} aktif pozisyon başarıyla yüklendi.`);
+        console.log(`✅ MongoDB'den ${savedPos.length} aktif pozisyon yüklendi.`);
+
+        // Taranmış havuz geçmişini yükle (Yeniden başlatma log spam'ini önler)
+        const savedPools = await seenPoolsCollection.find({}).toArray();
+        savedPools.forEach(p => {
+            seenPools[p.poolAddr] = { bought: p.bought, firstSeen: p.firstSeen };
+        });
+        console.log(`✅ MongoDB'den ${savedPools.length} taranmış havuz geçmişi yüklendi.`);
+
     } catch (err) {
         console.error("MongoDB Bağlantı Hatası:", err.message);
     }
@@ -61,7 +73,7 @@ async function savePositionToDb(tokenAddress, posData) {
                 { upsert: true }
             );
         } catch (err) {
-            console.error("MongoDB Kayıt Hatası:", err.message);
+            console.error("MongoDB Pozisyon Kayıt Hatası:", err.message);
         }
     }
 }
@@ -72,8 +84,21 @@ async function removePositionFromDb(tokenAddress) {
         try {
             await positionsCollection.deleteOne({ tokenAddress });
         } catch (err) {
-            console.error("MongoDB Silme Hatası:", err.message);
+            console.error("MongoDB Pozisyon Silme Hatası:", err.message);
         }
+    }
+}
+
+async function saveSeenPoolToDb(poolAddr, poolData) {
+    seenPools[poolAddr] = poolData;
+    if (seenPoolsCollection) {
+        try {
+            await seenPoolsCollection.updateOne(
+                { poolAddr },
+                { $set: { poolAddr, ...poolData } },
+                { upsert: true }
+            );
+        } catch (err) {}
     }
 }
 
@@ -118,12 +143,7 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
     }
 }
 
-function getPoolDisplayName(pool) {
-    if (pool.name) return pool.name;
-    return "YENİ/GRAM";
-}
-
-// GeckoTerminal Alternatifi: STON.fi ve DeDust Doğrudan Tarama
+// STON.fi ve DeDust Doğrudan Tarama
 async function fetchNewGramPools() {
     let allPools = [];
 
@@ -145,9 +165,7 @@ async function fetchNewGramPools() {
         allPools.push(...filteredSton);
     } catch (error) {
         if (error.response && error.response.status === 429) {
-            console.warn("⚠️ STON.fi 429 alındي, bekleniyor...");
-        } else {
-            console.error("STON.fi Havuz Çekme Hatası:", error.message);
+            console.warn("⚠️ STON.fi 429 alındı, bekleniyor...");
         }
     }
 
@@ -171,8 +189,6 @@ async function fetchNewGramPools() {
     } catch (error) {
         if (error.response && error.response.status === 429) {
             console.warn("⚠️ DeDust 429 alındı, bekleniyor...");
-        } else {
-            console.error("DeDust Havuz Çekme Hatası:", error.message);
         }
     }
 
@@ -201,29 +217,13 @@ async function checkSafetyWithSimulation(pool) {
         if (data.freeze_enabled === true || (data.metadata && data.metadata.freeze_available === true)) return { safe: false, reason: "Güvenlik İhlali: FREEZE yetkisi aktif!" };
         if (data.transfer_fee_enabled === true) return { safe: false, reason: "Güvenlik İhlali: Gizli Transfer Ücreti (Tax) tespit edildi!" };
 
-        // Simülasyon Kalkanı Kontrolü
-        try {
-            const routerAddress = pool.dex.toLowerCase().includes('dedust') 
-                ? "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2" 
-                : "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
-
-            const simulatePayload = { account: routerAddress };
-            const simResponse = await axios.post(`https://tonapi.io/v2/blockchain/simulate`, simulatePayload, { headers, timeout: 6000 });
-            
-            if (simResponse.data && simResponse.data.error) {
-                return { safe: false, reason: `Simülasyon Kalkanı: Sözleşme simülasyonda hata verdi (${simResponse.data.error}).` };
-            }
-        } catch (simErr) {
-            // Simülasyon hatası botu durdurmasın diye geçiş izni verilir
-        }
-
         return { safe: true, token: tokenAddress, dex: pool.dex };
     } catch (error) {
         return { safe: true, token: pool.base_token_address, dex: pool.dex };
     }
 }
 
-async function executeBuySwap(tokenAddress, amountTon, dexType, poolAttrs) {
+async function executeBuySwap(tokenAddress, amountTon, dexType) {
     try {
         console.log(`Gerçek Router Alımı Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
         const { client, wallet } = await getWalletClient();
@@ -405,12 +405,12 @@ async function sniperWorker() {
             const poolAddr = pool.address;
             const tokenAddr = pool.base_token_address;
             const tokenName = pool.name;
-            const liqUsd = pool.reserve_in_usd;
 
             if (!tokenAddr || tokenAddr === GRAM_MASTER_ADDRESS || activePositions[tokenAddr]) continue;
 
             if (!seenPools[poolAddr]) {
-                seenPools[poolAddr] = { bought: false, firstSeen: Date.now() };
+                await saveSeenPoolToDb(poolAddr, { bought: false, firstSeen: Date.now() });
+                continue; // İlk kez görüldü, olgunlaşma süresi için atla
             }
 
             let poolInfo = seenPools[poolAddr];
@@ -418,11 +418,11 @@ async function sniperWorker() {
 
             const poolAge = Date.now() - poolInfo.firstSeen;
             if (poolAge < 60000) {
-                console.log(`⏳ Havuz olgunlaşıyor (${(poolAge / 1000).toFixed(0)}s / 60s): ${tokenName}`);
-                continue; 
+                continue; // 60 saniyeden küçükse bekle
             }
 
             poolInfo.bought = true; 
+            await saveSeenPoolToDb(poolAddr, poolInfo);
 
             try {
                 await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Hedef Havuz Yakalandı:** \`${tokenName}\``, { parse_mode: "Markdown" });
@@ -430,7 +430,7 @@ async function sniperWorker() {
 
             const safety = await checkSafetyWithSimulation(pool);
             if (safety.safe) {
-                const buyResult = await executeBuySwap(safety.token, 0.5, safety.dex, pool);
+                const buyResult = await executeBuySwap(safety.token, 0.5, safety.dex);
                 if (buyResult.success) {
                     const posData = { 
                         entryPrice: buyResult.entryPrice, 
@@ -466,7 +466,7 @@ bot.onText(/\/baslat/, async (msg) => {
         await initDatabase();
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🎯 TP: %35 | 🛑 SL: %25\n🛡️ Doğrudan DEX API & Simülasyon Kalkanı Devrede", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🎯 TP: %35 | 🛑 SL: %25\n🛡️ MongoDB Havuz Hafızası & Doğrudan DEX API Devrede", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -495,7 +495,7 @@ bot.onText(/\/bakiye/, async (msg) => {
     }
 });
 
-console.log("Enterprise Sniper Bot doğrudan DEX altyapısıyla başarıyla başlatıldı...");
+console.log("Enterprise Sniper Bot eksiksiz altyapıyla başarıyla başlatıldı...");
 
 process.on('uncaughtException', (err) => {
   console.error('Yakalanamayan hata:', err);
