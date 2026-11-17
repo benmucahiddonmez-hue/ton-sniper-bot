@@ -1,3 +1,4 @@
+
 // bot.js - State Reconciliation ve Gelişmiş Güvenlik Kalkanlı Production Botu
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
@@ -53,25 +54,56 @@ function isGram(addr) {
   return sameAddr(addr, GRAM_MASTER_ADDRESS);
 }
 
+// CoinMarketCap GRAM fiyat güncelleme
 async function updateGramPrice() {
   try {
-    const { stonApi } = await getCtx();
-    const asset = await stonApi.getAsset(GRAM_MASTER_ADDRESS);
+    const response = await axios.get(
+      'https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest',
+      {
+        params: {
+          slug: 'gram',
+          convert: 'USD'
+        },
+        timeout: 10000
+      }
+    );
 
-    if (!asset) throw new Error("GRAM varlığı STON.fi üzerinde bulunamadı.");
+    if (response.data?.status?.error_code &&
+        Number(response.data.status.error_code) !== 0) {
+      throw new Error(
+        response.data.status.error_message || "CoinMarketCap API hatası"
+      );
+    }
 
-    const price = Number(asset.dexPriceUsd ?? asset.dexUsdPrice ?? asset.dex_price_usd ?? asset.dex_usd_price);
-    const decimals = Number(asset.decimals);
+    const data = response.data?.data || {};
 
-    if (!Number.isFinite(price) || price <= 0) throw new Error("Geçersiz GRAM fiyatı.");
-    if (Number.isInteger(decimals) && decimals >= 0 && decimals <= 30) GRAM_DECIMALS = decimals;
+    const gram = Array.isArray(data)
+      ? data.find(item => String(item.slug).toLowerCase() === 'gram')
+      : Object.values(data).find(
+          item => String(item.slug).toLowerCase() === 'gram'
+        );
+
+    if (!gram) {
+      throw new Error("CoinMarketCap GRAM kaydı bulunamadı.");
+    }
+
+    const price = Number(gram.quote?.USD?.price);
+
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error("Geçersiz GRAM fiyatı.");
+    }
 
     GRAM_PRICE_USD = price;
     lastPriceUpdate = Date.now();
-    console.log(`📊 Güncel GRAM Fiyatı: $${GRAM_PRICE_USD} | Decimals: ${GRAM_DECIMALS}`);
+
+    console.log(
+      `📊 CoinMarketCap GRAM: $${GRAM_PRICE_USD} | Decimals: ${GRAM_DECIMALS}`
+    );
+
     return true;
+
   } catch (error) {
-    console.error("GRAM fiyat güncelleme hatası:", error.message);
+    console.error("CoinMarketCap GRAM fiyat hatası:", error.response?.data || error.message);
     return false;
   }
 }
