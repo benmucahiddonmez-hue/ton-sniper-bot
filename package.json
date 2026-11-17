@@ -9,7 +9,7 @@
   "dependencies": {
     "@ston-fi/api": "^0.12.0",
     "@ston-fi/sdk": "^2.0.0",
-    "@ton/core": "^0.55.0",
+    "@ton/core": "^0.62.0",
     "@ton/crypto": "^3.2.0",
     "@ton/ton": "^15.0.0",
     "axios": "^1.6.0",
