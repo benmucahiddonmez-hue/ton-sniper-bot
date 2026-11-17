@@ -137,8 +137,8 @@ async function fetchNewGramPools() {
         return response.data.data || [];
     } catch (error) {
         if (error.response && error.response.status === 429) {
-            console.warn("⚠️ GeckoTerminal 429 alındı, 15 saniye bekleniyor...");
-            await new Promise(resolve => setTimeout(resolve, 15000));
+            console.warn("⚠️ GeckoTerminal 429 alındı, 25 saniye bekleniyor...");
+            await new Promise(resolve => setTimeout(resolve, 25000));
         } else {
             console.error("Havuz verisi çekme hatası:", error.message);
         }
