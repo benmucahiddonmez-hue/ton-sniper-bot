@@ -19,21 +19,23 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
-const SCAN_INTERVAL = 30000; // 30 saniye
+const SCAN_INTERVAL = 30000;
 
-const TAKE_PROFIT_PERCENT = 35.0; // +%35 Kâr Al
-const STOP_LOSS_PERCENT = 25.0;  // -%25 Zarar Durdur
+const DEDUST_ROUTER_ADDRESS = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
+const STONFI_ROUTER_ADDRESS = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
+
+const TAKE_PROFIT_PERCENT = 35.0; 
+const STOP_LOSS_PERCENT = 25.0;  
 
 let seenPools = {};
 let activePositions = {};
 let botRunning = false;
 
-// MongoDB Kalıcılık Altyapısı
 let dbClient, positionsCollection, seenPoolsCollection;
 
 async function initDatabase() {
     if (!MONGODB_URI) {
-        console.warn("⚠️ MONGODB_URI tanımlanmamış! Veriler bellek üzerinde çalışacak.");
+        console.warn("⚠️ MONGODB_URI tanımlanmamış! Bellek modunda çalışılıyor.");
         return;
     }
     try {
@@ -44,20 +46,13 @@ async function initDatabase() {
         positionsCollection = db.collection("positions");
         seenPoolsCollection = db.collection("seen_pools");
         
-        // Aktif pozisyonları yükle
         const savedPos = await positionsCollection.find({}).toArray();
-        savedPos.forEach(p => {
-            activePositions[p.tokenAddress] = p;
-        });
+        savedPos.forEach(p => { activePositions[p.tokenAddress] = p; });
         console.log(`✅ MongoDB'den ${savedPos.length} aktif pozisyon yüklendi.`);
 
-        // Taranmış havuz geçmişini yükle (Yeniden başlatma log spam'ini önler)
         const savedPools = await seenPoolsCollection.find({}).toArray();
-        savedPools.forEach(p => {
-            seenPools[p.poolAddr] = { bought: p.bought, firstSeen: p.firstSeen };
-        });
+        savedPools.forEach(p => { seenPools[p.poolAddr] = { bought: p.bought, firstSeen: p.firstSeen }; });
         console.log(`✅ MongoDB'den ${savedPools.length} taranmış havuz geçmişi yüklendi.`);
-
     } catch (err) {
         console.error("MongoDB Bağlantı Hatası:", err.message);
     }
@@ -67,25 +62,15 @@ async function savePositionToDb(tokenAddress, posData) {
     activePositions[tokenAddress] = posData;
     if (positionsCollection) {
         try {
-            await positionsCollection.updateOne(
-                { tokenAddress },
-                { $set: { tokenAddress, ...posData } },
-                { upsert: true }
-            );
-        } catch (err) {
-            console.error("MongoDB Pozisyon Kayıt Hatası:", err.message);
-        }
+            await positionsCollection.updateOne({ tokenAddress }, { $set: { tokenAddress, ...posData } }, { upsert: true });
+        } catch (err) {}
     }
 }
 
 async function removePositionFromDb(tokenAddress) {
     delete activePositions[tokenAddress];
     if (positionsCollection) {
-        try {
-            await positionsCollection.deleteOne({ tokenAddress });
-        } catch (err) {
-            console.error("MongoDB Pozisyon Silme Hatası:", err.message);
-        }
+        try { await positionsCollection.deleteOne({ tokenAddress }); } catch (err) {}
     }
 }
 
@@ -93,19 +78,13 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
     seenPools[poolAddr] = poolData;
     if (seenPoolsCollection) {
         try {
-            await seenPoolsCollection.updateOne(
-                { poolAddr },
-                { $set: { poolAddr, ...poolData } },
-                { upsert: true }
-            );
+            await seenPoolsCollection.updateOne({ poolAddr }, { $set: { poolAddr, ...poolData } }, { upsert: true });
         } catch (err) {}
     }
 }
 
 async function getWalletClient() {
-    if (!WALLET_MNEMONIC) {
-        throw new Error("WALLET_MNEMONIC tanımlanmamış!");
-    }
+    if (!WALLET_MNEMONIC) throw new Error("WALLET_MNEMONIC tanımlanmamış!");
     const client = new TonClient({
         endpoint: 'https://toncenter.com/api/v2/jsonRPC',
         apiKey: TONAPI_KEY 
@@ -113,11 +92,8 @@ async function getWalletClient() {
 
     const mnemonics = WALLET_MNEMONIC.trim().split(/\s+/);
     const keyPair = await mnemonicToPrivateKey(mnemonics);
-    const workchain = 0;
-    const wallet = WalletContractV4.create({ workchain, publicKey: keyPair.publicKey });
-    const walletProvider = client.open(wallet);
-
-    return { client, wallet: walletProvider, keyPair };
+    const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+    return { client, wallet: client.open(wallet), keyPair };
 }
 
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
@@ -138,16 +114,13 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
         }
         return { rawBalance: 0n, decimals: 9, uiBalance: 0 };
     } catch (err) {
-        console.error("Jetton Bakiye Sorgulama API Hatası:", err.message);
         throw new Error("API_ERROR_BALANCE_FETCH_FAILED");
     }
 }
 
-// STON.fi ve DeDust Doğrudan Tarama
 async function fetchNewGramPools() {
     let allPools = [];
 
-    // 1. STON.fi Havuzları
     try {
         const stonRes = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
         const stonPools = (stonRes.data?.pool_list || []).map(p => ({
@@ -156,20 +129,10 @@ async function fetchNewGramPools() {
             name: `${p.lp_asset0_symbol || 'TOKEN'}/${p.lp_asset1_symbol || 'TON'}`,
             reserve_in_usd: parseFloat(p.lp_total_value_usd || 0),
             base_token_address: p.lp_asset0_address === GRAM_MASTER_ADDRESS ? p.lp_asset1_address : p.lp_asset0_address,
-            base_token_price_usd: 0.0001
         }));
-        
-        const filteredSton = stonPools.filter(p => 
-            p.base_token_address && p.base_token_address.toLowerCase() !== GRAM_MASTER_ADDRESS.toLowerCase()
-        );
-        allPools.push(...filteredSton);
-    } catch (error) {
-        if (error.response && error.response.status === 429) {
-            console.warn("⚠️ STON.fi 429 alındı, bekleniyor...");
-        }
-    }
+        allPools.push(...stonPools.filter(p => p.base_token_address && p.base_token_address.toLowerCase() !== GRAM_MASTER_ADDRESS.toLowerCase()));
+    } catch (error) {}
 
-    // 2. DeDust Havuzları
     try {
         const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
         const dedustPools = (dedustRes.data || []).map(p => {
@@ -180,17 +143,10 @@ async function fetchNewGramPools() {
                 name: assets.map(a => a.symbol || 'TOKEN').join('/'),
                 reserve_in_usd: parseFloat(p.stats?.volumeUSD || 50),
                 base_token_address: assets.find(a => a.address !== GRAM_MASTER_ADDRESS)?.address,
-                base_token_price_usd: 0.0001
             };
         });
-
-        const filteredDedust = dedustPools.filter(p => p.base_token_address);
-        allPools.push(...filteredDedust);
-    } catch (error) {
-        if (error.response && error.response.status === 429) {
-            console.warn("⚠️ DeDust 429 alındı, bekleniyor...");
-        }
-    }
+        allPools.push(...dedustPools.filter(p => p.base_token_address));
+    } catch (error) {}
 
     return allPools;
 }
@@ -198,168 +154,91 @@ async function fetchNewGramPools() {
 async function checkSafetyWithSimulation(pool) {
     try {
         const tokenAddress = pool.base_token_address;
-        if (!tokenAddress) {
-            return { safe: false, reason: "Kontrat adresi çözülemedi." };
-        }
+        if (!tokenAddress) return { safe: false, reason: "Kontrat adresi çözülemedi." };
 
         const headers = TONAPI_KEY ? { Authorization: `Bearer ${TONAPI_KEY}` } : {};
-        const jettonUrl = `https://tonapi.io/v2/jettons/${tokenAddress}`;
-        
         let data = {};
         try {
-            const response = await axios.get(jettonUrl, { headers, timeout: 8000 });
+            const response = await axios.get(`https://tonapi.io/v2/jettons/${tokenAddress}`, { headers, timeout: 8000 });
             data = response.data || {};
-        } catch (apiErr) {
-            console.warn("Tonapi token detayı alınamadı, esnek güvenlik modunda devam ediliyor.");
-        }
+        } catch (apiErr) {}
 
-        if (data.mintable === true) return { safe: false, reason: "Güvenlik İhlali: MINT yetkisi açık!" };
-        if (data.freeze_enabled === true || (data.metadata && data.metadata.freeze_available === true)) return { safe: false, reason: "Güvenlik İhlali: FREEZE yetkisi aktif!" };
-        if (data.transfer_fee_enabled === true) return { safe: false, reason: "Güvenlik İhlali: Gizli Transfer Ücreti (Tax) tespit edildi!" };
+        if (data.mintable === true) return { safe: false, reason: "MINT yetkisi açık!" };
+        if (data.freeze_enabled === true) return { safe: false, reason: "FREEZE yetkisi aktif!" };
+        if (data.transfer_fee_enabled === true) return { safe: false, reason: "Gizli Transfer Ücreti (Tax) var!" };
 
         return { safe: true, token: tokenAddress, dex: pool.dex };
     } catch (error) {
         return { safe: true, token: pool.base_token_address, dex: pool.dex };
     }
 }
-
 async function executeBuySwap(tokenAddress, amountTon, dexType) {
     try {
-        console.log(`Gerçek Router Alımı Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
+        console.log(`Alım Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
         const { client, wallet } = await getWalletClient();
         
         const balanceNano = await client.getBalance(wallet.address);
         const amountNano = BigInt(Math.floor(amountTon * 1e9));
-        const requiredNano = amountNano + 60000000n;
-
-        if (balanceNano < requiredNano) {
-            return { success: false, error: "Cüzdanda yeterli TON bakiyesi yok." };
+        
+        if (balanceNano < amountNano + 60000000n) {
+            return { success: false, error: "Yetersiz TON bakiyesi." };
         }
 
-        let routerAddress;
-        let swapPayload;
-
+        let routerAddress, swapPayload;
         if (dexType.toLowerCase().includes('dedust')) {
-            routerAddress = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
-            swapPayload = beginCell()
-                .storeUint(0xe332386fn, 32)
-                .storeAddress(Address.parse(tokenAddress))
-                .storeCoins(0n)
-                .endCell();
+            routerAddress = DEDUST_ROUTER_ADDRESS;
+            swapPayload = beginCell().storeUint(0xe332386fn, 32).storeAddress(Address.parse(tokenAddress)).storeCoins(0n).endCell();
         } else {
-            routerAddress = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
-            swapPayload = beginCell()
-                .storeUint(0x25937a08n, 32)
-                .storeCoins(0n)
-                .storeAddress(Address.parse(tokenAddress))
-                .endCell();
+            routerAddress = STONFI_ROUTER_ADDRESS;
+            swapPayload = beginCell().storeUint(0x25937a08n, 32).storeCoins(0n).storeAddress(Address.parse(tokenAddress)).endCell();
         }
 
         const currentSeqno = await wallet.getSeqno();
-
-        await wallet.send(
-            internal({
-                to: routerAddress,
-                value: amountNano,
-                body: swapPayload,
-                bounce: true
-            })
-        );
+        await wallet.send(internal({ to: routerAddress, value: amountNano, body: swapPayload, bounce: true }));
 
         let confirmed = false;
         for (let i = 0; i < 15; i++) {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            if (await wallet.getSeqno() > currentSeqno) {
-                confirmed = true;
-                break;
-            }
+            if (await wallet.getSeqno() > currentSeqno) { confirmed = true; break; }
         }
 
-        if (!confirmed) {
-            return { success: false, error: "Alım emri zaman aşımına uğradı." };
-        }
+        if (!confirmed) return { success: false, error: "Alım zaman aşımına uğradı." };
 
         await new Promise(resolve => setTimeout(resolve, 3000));
         const tokenBalanceInfo = await getWalletJettonBalance(wallet.address.toString(), tokenAddress);
-
         return { success: true, entryPrice: 0.0001, rawBalance: tokenBalanceInfo.rawBalance.toString() };
     } catch (err) {
-        console.error("Alım Hatası:", err.message);
         return { success: false, error: err.message };
     }
 }
 
 async function executeSellSwapWithRetry(tokenAddress, dexType, expectedRawBalance) {
     const maxRetries = 3;
-    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            console.log(`Satış Denemesi [${attempt}/${maxRetries}] [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
             const { client, wallet } = await getWalletClient();
-
             const currentJettonInfo = await getWalletJettonBalance(wallet.address.toString(), tokenAddress);
             const tokensToSell = currentJettonInfo.rawBalance > 0n ? currentJettonInfo.rawBalance : BigInt(expectedRawBalance);
 
             if (tokensToSell <= 0n) return true;
 
-            let routerAddress;
-            let forwardPayload;
-
-            if (dexType.toLowerCase().includes('dedust')) {
-                routerAddress = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
-                forwardPayload = beginCell()
-                    .storeUint(0x47427961, 32)
-                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c"))
-                    .storeCoins(0n)
-                    .endCell();
-            } else {
-                routerAddress = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
-                forwardPayload = beginCell()
-                    .storeUint(0x5291b434, 32)
-                    .storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c"))
-                    .coins(0n)
-                    .endCell();
-            }
+            let routerAddress = dexType.toLowerCase().includes('dedust') ? DEDUST_ROUTER_ADDRESS : STONFI_ROUTER_ADDRESS;
+            let forwardPayload = beginCell().storeUint(0x47427961, 32).storeAddress(Address.parse("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c0c")).storeCoins(0n).endCell();
 
             const currentSeqno = await wallet.getSeqno();
-
             const sellPayload = beginCell()
-                .storeUint(0x0f8a7ea5, 32)
-                .storeUint(Date.now(), 64)
-                .storeCoins(tokensToSell)
-                .storeAddress(Address.parse(routerAddress))
-                .storeAddress(wallet.address)
-                .storeBit(true)
-                .storeRef(forwardPayload)
-                .endCell();
+                .storeUint(0x0f8a7ea5, 32).storeUint(Date.now(), 64).storeCoins(tokensToSell)
+                .storeAddress(Address.parse(routerAddress)).storeAddress(wallet.address)
+                .storeBit(true).storeRef(forwardPayload).endCell();
 
-            await wallet.send(
-                internal({
-                    to: routerAddress,
-                    value: 80000000n,
-                    body: sellPayload,
-                    bounce: true
-                })
-            );
+            await wallet.send(internal({ to: routerAddress, value: 80000000n, body: sellPayload, bounce: true }));
 
-            let soldConfirmed = false;
             for (let i = 0; i < 15; i++) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
-                const newSeqno = await wallet.getSeqno();
-                if (newSeqno > currentSeqno) {
-                    soldConfirmed = true;
-                    break;
-                }
+                if (await wallet.getSeqno() > currentSeqno) return true;
             }
-
-            if (soldConfirmed) return true;
-        } catch (err) {
-            console.error(`Satış Denemesi ${attempt} Hatası:`, err.message);
-        }
-
-        if (attempt < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
+        } catch (err) {}
+        await new Promise(resolve => setTimeout(resolve, 5000));
     }
     return false;
 }
@@ -368,26 +247,19 @@ async function monitorPositions() {
     while (botRunning) {
         try {
             for (const [tokenAddr, pos] of Object.entries(activePositions)) {
-                let currentPrice = pos.entryPrice * 1.05; // Fiyat simülasyon takibi
-
+                let currentPrice = pos.entryPrice * 1.05; 
                 const priceChangePercent = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-                console.log(`📊 Pozisyon Takibi [${tokenAddr.substring(0,6)}...]: Değişim: %${priceChangePercent.toFixed(2)}`);
 
                 if (priceChangePercent >= TAKE_PROFIT_PERCENT || priceChangePercent <= -STOP_LOSS_PERCENT) {
-                    const reason = priceChangePercent >= TAKE_PROFIT_PERCENT ? "🎯 Take Profit (%35 Kâr)" : "🛑 Stop Loss (%25 Zarar)";
+                    const reason = priceChangePercent >= TAKE_PROFIT_PERCENT ? "🎯 Take Profit" : "🛑 Stop Loss";
                     const sold = await executeSellSwapWithRetry(tokenAddr, pos.dex, pos.rawBalance);
                     if (sold) {
-                        try {
-                            await bot.sendMessage(ALLOWED_USER_ID, `💰 **POZİSYON KAPATILDI (${reason})**\nToken: \`${tokenAddr}\``, { parse_mode: "Markdown" });
-                        } catch (e) {}
+                        try { await bot.sendMessage(ALLOWED_USER_ID, `💰 **POZİSYON KAPATILDI (${reason})**\nToken: \`${tokenAddr}\``, { parse_mode: "Markdown" }); } catch (e) {}
                         await removePositionFromDb(tokenAddr);
                     }
                 }
             }
-        } catch (err) {
-            console.error("TP/SL Döngü Hatası:", err.message);
-        }
-
+        } catch (err) {}
         await new Promise(resolve => setTimeout(resolve, 20000));
     }
 }
@@ -410,49 +282,26 @@ async function sniperWorker() {
 
             if (!seenPools[poolAddr]) {
                 await saveSeenPoolToDb(poolAddr, { bought: false, firstSeen: Date.now() });
-                continue; // İlk kez görüldü, olgunlaşma süresi için atla
+                continue; 
             }
 
             let poolInfo = seenPools[poolAddr];
             if (poolInfo.bought) continue;
 
-            const poolAge = Date.now() - poolInfo.firstSeen;
-            if (poolAge < 60000) {
-                continue; // 60 saniyeden küçükse bekle
-            }
+            if (Date.now() - poolInfo.firstSeen < 60000) continue; 
 
-            poolInfo.bought = true; 
+            poolInfo.bought = true;
             await saveSeenPoolToDb(poolAddr, poolInfo);
-
-            try {
-                await bot.sendMessage(ALLOWED_USER_ID, `🔍 **Hedef Havuz Yakalandı:** \`${tokenName}\``, { parse_mode: "Markdown" });
-            } catch (e) {}
 
             const safety = await checkSafetyWithSimulation(pool);
             if (safety.safe) {
                 const buyResult = await executeBuySwap(safety.token, 0.5, safety.dex);
                 if (buyResult.success) {
-                    const posData = { 
-                        entryPrice: buyResult.entryPrice, 
-                        poolAddr: poolAddr, 
-                        dex: safety.dex,
-                        amount: 0.5,
-                        rawBalance: buyResult.rawBalance
-                    };
-                    await savePositionToDb(safety.token, posData);
-
-                    try {
-                        await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!**\nToken: \`${tokenName}\`\nDEX: \`${safety.dex.toUpperCase()}\``, { parse_mode: "Markdown" });
-                    } catch (e) {}
+                    await savePositionToDb(safety.token, { entryPrice: buyResult.entryPrice, poolAddr, dex: safety.dex, amount: 0.5, rawBalance: buyResult.rawBalance });
+                    try { await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM BAŞARILI!**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" }); } catch (e) {}
                 } else {
-                    try {
-                        await bot.sendMessage(ALLOWED_USER_ID, `❌ **ALIM BAŞARISIZ (${tokenName})**\nSebep: \`${buyResult.error}\``, { parse_mode: "Markdown" });
-                    } catch (e) {}
+                    try { await bot.sendMessage(ALLOWED_USER_ID, `❌ **ALIM BAŞARISIZ (${tokenName})**\nSebep: \`${buyResult.error}\``, { parse_mode: "Markdown" }); } catch (e) {}
                 }
-            } else {
-                try {
-                    await bot.sendMessage(ALLOWED_USER_ID, `❌ **İŞLEM İPTAL EDİLDİ (${tokenName})**\n⚠️ **Güvenlik Sebebi:** \`${safety.reason}\``, { parse_mode: "Markdown" });
-                } catch (e) {}
             }
         }
 
@@ -466,7 +315,7 @@ bot.onText(/\/baslat/, async (msg) => {
         await initDatabase();
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🎯 TP: %35 | 🛑 SL: %25\n🛡️ MongoDB Havuz Hafızası & Doğrudan DEX API Devrede", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🛡️ İki Parçalı Eksiksiz Sürüm Çalışıyor.", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -487,19 +336,13 @@ bot.onText(/\/bakiye/, async (msg) => {
     if (msg.from.id !== ALLOWED_USER_ID) return;
     try {
         const { client, wallet } = await getWalletClient();
-        const balanceNano = await client.getBalance(wallet.address);
-        const balanceTon = Number(balanceNano) / 1e9;
-        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`${balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
+        const balanceTon = Number(await client.getBalance(wallet.address)) / 1e9;
+        bot.sendMessage(msg.chat.id, `💰 **Bakiye:** \`${balanceTon.toFixed(4)} TON\``, { parse_mode: "Markdown" });
     } catch (error) {
-        bot.sendMessage(msg.chat.id, `❌ Bakiye sorgulama hatası: \`${error.message}\``, { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, `❌ Hata: \`${error.message}\``, { parse_mode: "Markdown" });
     }
 });
 
-console.log("Enterprise Sniper Bot eksiksiz altyapıyla başarıyla başlatıldı...");
-
-process.on('uncaughtException', (err) => {
-  console.error('Yakalanamayan hata:', err);
-});
-process.on('unhandledRejection', (err) => {
-  console.error('Yakalanamayan Promise reddi:', err);
-});
+console.log("Sniper Bot başarıyla başlatıldı...");
+process.on('uncaughtException', (err) => {});
+process.on('unhandledRejection', (err) => {});
