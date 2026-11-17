@@ -19,8 +19,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
-const SCAN_INTERVAL = 30000; // 30 saniye (Dakikada 2 kontrol)
-
+const SCAN_INTERVAL = 30000; // 30 saniye (Dakikada 2 kontrol - 429 koruması)
 
 const TAKE_PROFIT_PERCENT = 35.0; // +%35 Kâr Al
 const STOP_LOSS_PERCENT = 25.0;  // -%25 Zarar Durdur
@@ -411,11 +410,21 @@ async function sniperWorker() {
             const tokenName = getPoolDisplayName(pool, attrs);
 
             if (!seenPools[poolAddr]) {
-                seenPools[poolAddr] = { bought: false };
+                seenPools[poolAddr] = { 
+                    bought: false, 
+                    firstSeen: Date.now() 
+                };
             }
 
             let poolInfo = seenPools[poolAddr];
             if (poolInfo.bought) continue;
+
+            // Havuzun üzerinden 1 dakika (60000 ms) geçip geçmediğini kontrol et (30sn'de bir taranarak toplam 2 kontrol yapılır)
+            const poolAge = Date.now() - poolInfo.firstSeen;
+            if (poolAge < 60000) {
+                console.log(`⏳ Havuz olgunlaşıyor (${(poolAge / 1000).toFixed(0)}s / 60s): ${tokenName}`);
+                continue; 
+            }
 
             if (liqUsd >= MIN_LIQUIDITY_USD) {
                 poolInfo.bought = true; 
@@ -463,7 +472,7 @@ bot.onText(/\/baslat/, async (msg) => {
         await initDatabase();
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Enterprise Production Bot Aktif!**\n🎯 TP: %35 | 🛑 SL: %25\n🛡️ DEX-Specific Payload, Simülasyon, MongoDB & Fallback Koruma Devrede", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Enterprise Production Bot Aktif!**\n🎯 TP: %35 | 🛑 SL: %25\n🛡️ 30sn Tarama (1dk Olgunlaşma), Simülasyon & MongoDB Devrede", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -486,7 +495,7 @@ bot.onText(/\/bakiye/, async (msg) => {
         const { client, wallet } = await getWalletClient();
         const balanceNano = await client.getBalance(wallet.address);
         const balanceTon = Number(balanceNano) / 1e9;
-        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`${balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`{balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
     } catch (error) {
         bot.sendMessage(msg.chat.id, `❌ Bakiye sorgulama hatası: \`${error.message}\``, { parse_mode: "Markdown" });
     }
