@@ -495,7 +495,7 @@ bot.onText(/\/bakiye/, async (msg) => {
         const { client, wallet } = await getWalletClient();
         const balanceNano = await client.getBalance(wallet.address);
         const balanceTon = Number(balanceNano) / 1e9;
-        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`{balanceTon.toFixed(4)} TON\`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, `💰 **Cüzdan Bakiyeniz:**\n\`${balanceTon.toFixed(4)} TON`\n\n📍 Adres: \`${wallet.address.toString()}\``, { parse_mode: "Markdown" });
     } catch (error) {
         bot.sendMessage(msg.chat.id, `❌ Bakiye sorgulama hatası: \`${error.message}\``, { parse_mode: "Markdown" });
     }
