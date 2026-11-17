@@ -23,7 +23,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 let TON_PRICE_USD = 0;
 let lastPriceUpdate = 0;
 
-const MIN_LIQUIDITY_USD = 100.0;
+const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 60000;
 const BUY_AMOUNT = 0.5;
