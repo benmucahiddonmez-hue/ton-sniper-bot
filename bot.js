@@ -1,4 +1,4 @@
-// bot.js - STON.fi ve DeDust Çift DEX Taramalı Production Sniper Botu
+// bot.js - Çift DEX (STON.fi + DeDust) Production Sniper & Portfolio Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -10,6 +10,7 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const MONGODB_URI = process.env.MONGODB_URI;
 
+// Gram master kontrat adresi
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 
 if (!TOKEN || !ALLOWED_USER_ID) {
@@ -92,7 +93,7 @@ async function getWalletAndGramStats(walletAddress) {
         const balanceNano = await client.getBalance(walletAddress);
         balanceTon = Number(balanceNano) / 1e9;
 
-        // 2. Dinamik Gram Bakiye
+        // 2. Dinamik Gram Bakiye (Cüzdan envanterinden akıllı arama)
         try {
             const tonapiKey = process.env.TONAPI_KEY;
             const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
@@ -147,6 +148,8 @@ async function getWalletAndGramStats(walletAddress) {
 
         if (gramPriceUsd <= 0) gramPriceUsd = 1.05;
 
+        console.log(`[DEBUG STATS] TON: ${balanceTon}, Gram: ${gramBalance}, Gram USD: ${gramPriceUsd}`);
+
     } catch (err) {
         console.error("getWalletAndGramStats genel hata:", err.message);
     }
@@ -154,7 +157,7 @@ async function getWalletAndGramStats(walletAddress) {
     return { balanceTon, gramBalance, gramPriceUsd };
 }
 
-// State Reconciliation
+// State Reconciliation (Veritabanı & Cüzdan Senkronizasyonu)
 async function reconcilePositions() {
     if (!positionsCollection) return;
     try {
@@ -233,7 +236,7 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) { console.error("DB Havuz Kayıt Hatası:", err.message); }
 }
 
-// 🌐 ÇİFT DEX Taraması: STON.fi + DeDust v2 Havuzları
+// 🌐 ÇİFT DEX Taraması: STON.fi + DeDust v2
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     const updated = await updateTonPrice();
@@ -242,7 +245,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Havuz Taraması
+  // 1. STON.fi Taraması
   try {
     const { stonApi } = await getCtx();
     const poolsList = await stonApi.getPools();
@@ -278,13 +281,12 @@ async function fetchNewTonPools(applyFilter = true) {
     console.error("STON.fi tarama hatası:", error.message);
   }
 
-  // 2. DeDust v2 Havuz Taraması
+  // 2. DeDust v2 Taraması (Canlı API Verisi)
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
 
     const dedustPools = dedustPoolsList.map(p => {
-      // DeDust havuzlarında TON bazlı (native) varlıkları kontrol ediyoruz
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
 
@@ -318,7 +320,7 @@ async function fetchNewTonPools(applyFilter = true) {
   return allPools;
 }
 
-// Güvenlik Kontrolü
+// Token Güvenlik Kontrolü (Mint & Freeze Kalkanı)
 async function checkSafetyWithSimulation(tokenAddress) {
   try {
     const tonapiKey = process.env.TONAPI_KEY;
@@ -337,6 +339,7 @@ async function checkSafetyWithSimulation(tokenAddress) {
   }
 }
 
+// Güvenli Pozisyon Takip Döngüsü (Asla Kırılmaz)
 async function monitorPositions() {
   while (botRunning) {
     try {
@@ -360,111 +363,128 @@ async function monitorPositions() {
         }
       }
     } catch (err) {
-      console.error("Pozisyon takip hatası:", err.message);
+      console.error("⚠️ monitorPositions döngü içi hata:", err.message);
     }
     await new Promise(resolve => setTimeout(resolve, 20000));
   }
 }
 
-async function sniperWorker() {
-  monitorPositions();
-  await updateTonPrice();
-
-  let initialPools = await fetchNewTonPools(false);
-  for (const p of (initialPools || [])) {
-    if (!seenPools[p.address]) {
-      seenPools[p.address] = { status: 'old', firstSeen: Date.now(), attempts: 0 };
-      await saveSeenPoolToDb(p.address, seenPools[p.address]);
-    }
-  }
-
+// Güvenli ve Kendini Kurtaran (Self-Healing) Ana Sniper Worker
+async function startSniperWorkerLoop() {
   while (botRunning) {
-    let pools = [];
     try {
-      pools = await fetchNewTonPools(true);
-    } catch (err) {
-      await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
-      continue;
-    }
+      console.log("🚀 Sniper Worker döngüsü başlatılıyor...");
+      
+      monitorPositions();
+      await updateTonPrice();
 
-    for (const pool of pools) {
-      if (!botRunning) break;
-      if (!pool) continue;
-
-      const poolAddr = pool.address;
-      const tokenAddr = pool.base_token_address;
-      const tokenName = pool.name;
-
-      if (!tokenAddr || activePositions[tokenAddr]) continue;
-
-      const now = Date.now();
-      if (!seenPools[poolAddr]) {
-        seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
-        await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
-        continue;
+      let initialPools = await fetchNewTonPools(false);
+      for (const p of (initialPools || [])) {
+        if (!seenPools[p.address]) {
+          seenPools[p.address] = { status: 'old', firstSeen: Date.now(), attempts: 0 };
+          await saveSeenPoolToDb(p.address, seenPools[p.address]);
+        }
       }
 
-      let poolInfo = seenPools[poolAddr];
-      if (poolInfo.status !== 'pending') continue;
-      if (now - poolInfo.firstSeen < POOL_MATURITY_DELAY) continue;
-
-      const safety = await checkSafetyWithSimulation(tokenAddr);
-      if (safety.transient) continue;
-
-      if (safety.safe) {
-        const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
-        if (impact > 5) {
-          poolInfo.status = 'failed_permanently';
-          await saveSeenPoolToDb(poolAddr, poolInfo);
+      while (botRunning) {
+        let pools = [];
+        try {
+          pools = await fetchNewTonPools(true);
+        } catch (err) {
+          console.error("⚠️ Havuz tarama hatası (30sn sonra yeniden denenecek):", err.message);
+          await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
           continue;
         }
 
-        const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
-        if (buyResult.success) {
-          poolInfo.status = 'bought';
-          await saveSeenPoolToDb(poolAddr, poolInfo);
+        for (const pool of pools) {
+          if (!botRunning) break;
+          if (!pool) continue;
 
-          await savePositionToDb(tokenAddr, {
-            entryPrice: buyResult.costTon,
-            poolAddr: pool.address,
-            dex: pool.dex,
-            amount: buyResult.costTon,
-            rawBalance: buyResult.rawBalance.toString()
-          });
+          const poolAddr = pool.address;
+          const tokenAddr = pool.base_token_address;
+          const tokenName = pool.name;
 
-          try {
-            await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
-          } catch (e) {}
-        } else {
-          poolInfo.status = 'failed_permanently';
-          await saveSeenPoolToDb(poolAddr, poolInfo);
+          if (!tokenAddr || activePositions[tokenAddr]) continue;
+
+          const now = Date.now();
+          if (!seenPools[poolAddr]) {
+            seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
+            await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
+            continue;
+          }
+
+          let poolInfo = seenPools[poolAddr];
+          if (poolInfo.status !== 'pending') continue;
+          if (now - poolInfo.firstSeen < POOL_MATURITY_DELAY) continue;
+
+          const safety = await checkSafetyWithSimulation(tokenAddr);
+          if (safety.transient) continue;
+
+          if (safety.safe) {
+            const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
+            if (impact > 5) {
+              poolInfo.status = 'failed_permanently';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+              continue;
+            }
+
+            const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
+            if (buyResult.success) {
+              poolInfo.status = 'bought';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+
+              await savePositionToDb(tokenAddr, {
+                entryPrice: buyResult.costTon,
+                poolAddr: pool.address,
+                dex: pool.dex,
+                amount: buyResult.costTon,
+                rawBalance: buyResult.rawBalance.toString()
+              });
+
+              try {
+                await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
+              } catch (e) {}
+            } else {
+              poolInfo.status = 'failed_permanently';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+            }
+          } else {
+            poolInfo.status = 'failed_permanently';
+            await saveSeenPoolToDb(poolAddr, poolInfo);
+          }
         }
-      } else {
-        poolInfo.status = 'failed_permanently';
-        await saveSeenPoolToDb(poolAddr, poolInfo);
+
+        await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
+      }
+
+    } catch (criticalErr) {
+      console.error("❌ KRİTİK WORKER HATASI! Döngü çöktü, 10 saniye içinde yeniden başlatılıyor:", criticalErr.message);
+      if (botRunning) {
+        await new Promise(resolve => setTimeout(resolve, 10000));
       }
     }
-
-    await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
   }
 }
 
 // /baslat Komutu
 bot.onText(/\/baslat/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
-  if (!botRunning) {
-    try {
-      await getCtx();
-      await updateTonPrice();
-      await initDatabase();
+  
+  try {
+    await getCtx();
+    await updateTonPrice();
+    await initDatabase();
 
-      const { wallet } = await getCtx();
-      const stats = await getWalletAndGramStats(wallet.address);
+    const { wallet } = await getCtx();
+    const stats = await getWalletAndGramStats(wallet.address);
 
-      botRunning = true;
+    const wasRunning = botRunning;
+    botRunning = true;
+
+    if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Çift DEX (STON.fi + DeDust) Sniper Başlatıldı!**\n\n` +
+        `🚀 **Çift DEX Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -472,10 +492,12 @@ bot.onText(/\/baslat/, async (msg) => {
         { parse_mode: "Markdown" }
       );
       
-      sniperWorker();
-    } catch (e) {
-      bot.sendMessage(msg.chat.id, `❌ Başlatma Hatası: \`${e.message}\``);
+      startSniperWorkerLoop();
+    } else {
+      bot.sendMessage(msg.chat.id, `ℹ️ Bot zaten aktif çalışıyor, tarama döngüsü kontrol altında.`);
     }
+  } catch (e) {
+    bot.sendMessage(msg.chat.id, `❌ Başlatma Hatası: \`${e.message}\``);
   }
 });
 
