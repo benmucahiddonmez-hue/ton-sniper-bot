@@ -1,4 +1,4 @@
-// bot.js - Kesinleştirilmiş, Debug Loglu ve Tam Entegre Production Botu
+// bot.js - Dinamik TON & Gram Bakiyeli Production Sniper Botu
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -10,7 +10,7 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// Gram jetonunun STON.fi / TonAPI üzerindeki master adresi
+// Gram master adresi (Gerekirse dinamik tarama ile de destekleniyor)
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 
 if (!TOKEN || !ALLOWED_USER_ID) {
@@ -76,7 +76,7 @@ async function updateTonPrice() {
   }
 }
 
-// Cüzdan TON, Gram Bakiye ve STON.fi Gram Fiyatını Çeken Debug Loglu Fonksiyon
+// Cüzdan TON, Dinamik Gram Bakiye ve STON.fi Gram Fiyatı
 async function getWalletAndGramStats(walletAddress) {
     let balanceTon = 0;
     let gramBalance = 0;
@@ -85,7 +85,6 @@ async function getWalletAndGramStats(walletAddress) {
     try {
         const { client, stonApi } = await getCtx();
         
-        // 0. Önce TON fiyatını garantileyelim (Simülasyon hesabı için gerekli)
         if (TON_PRICE_USD <= 0) {
             await updateTonPrice();
         }
@@ -94,10 +93,27 @@ async function getWalletAndGramStats(walletAddress) {
         const balanceNano = await client.getBalance(walletAddress);
         balanceTon = Number(balanceNano) / 1e9;
 
-        // 2. Gram Bakiye
+        // 2. Dinamik Gram Bakiye (Cüzdan jeton envanterinden akıllı arama)
         try {
-            const rawGramBal = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS);
-            gramBalance = Number(rawGramBal) / 1e9;
+            const tonapiKey = process.env.TONAPI_KEY;
+            const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
+            const res = await axios.get(`https://tonapi.io/v2/accounts/${walletAddress.toString()}/jettons`, { headers, timeout: 5000 });
+            const balances = res.data?.balances || [];
+            
+            const foundGram = balances.find(j => {
+                const symbol = (j.jetton?.symbol || "").toLowerCase();
+                const name = (j.jetton?.name || "").toLowerCase();
+                return symbol.includes("gram") || name.includes("gram");
+            });
+
+            if (foundGram) {
+                const decimals = foundGram.jetton?.decimals || 9;
+                gramBalance = Number(foundGram.balance) / Math.pow(10, decimals);
+            } else {
+                // Eğer dinamik bulunamazsa standart master adresten dene
+                const rawGramBal = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS).catch(() => 0n);
+                gramBalance = Number(rawGramBal) / 1e9;
+            }
         } catch (e) {
             console.error("Gram bakiye çekilemedi:", e.message);
         }
@@ -418,9 +434,9 @@ bot.onText(/\/baslat/, async (msg) => {
         msg.chat.id, 
         `🚀 **Yerel TON Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
-        `💰 **TON Bakiye:** \`${stats.balanceTon.toFixed(2)} TON\`\n` +
-        `🪙 **Gram Bakiye:** \`${stats.gramBalance.toLocaleString()} GRAM\`\n` +
-        `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(2)}\``, 
+        `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
+        `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
+        `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
         { parse_mode: "Markdown" }
       );
       
@@ -451,9 +467,9 @@ bot.onText(/\/bakiye/, async (msg) => {
     bot.sendMessage(
       msg.chat.id, 
       `💰 **Cüzdan Durumu:**\n\n` +
-      `🔹 **TON Bakiye:** \`${stats.balanceTon.toFixed(4)} TON\`\n` +
-      `🔹 **Gram Bakiye:** \`${stats.gramBalance.toLocaleString()} GRAM\`\n` +
-      `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(2)}\``, 
+      `🔹 **TON:** \`${stats.balanceTon.toFixed(4)}\`\n` +
+      `🔹 **Gram:** \`${stats.gramBalance.toFixed(4)}\`\n` +
+      `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
       { parse_mode: "Markdown" }
     );
   } catch (error) {
