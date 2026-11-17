@@ -185,8 +185,7 @@ async function initDatabase() {
   try {
     dbClient = new MongoClient(MONGODB_URI, {
       tls: true,
-      tlsAllowInvalidCertificates: true,
-      tlsInsecure: true,
+      tlsInsecure: true, // tlsAllowInvalidCertificates kaldırıldı, bu tek başına yeterlidir
       retryWrites: true,
       serverSelectionTimeoutMS: 5000
     });
@@ -211,6 +210,7 @@ async function initDatabase() {
     console.error("MongoDB Bağlantı Hatası:", err.message);
   }
 }
+
 
 async function savePositionToDb(tokenAddress, posData) {
   activePositions[tokenAddress] = posData;
