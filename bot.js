@@ -1,4 +1,4 @@
-// bot.js - Kesintisiz, Stabil Çift DEX & Kararlı Tarama Modu
+// bot.js - Kesintisiz, Cache Korumalı Çift DEX Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -23,7 +23,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 let TON_PRICE_USD = 0;
 let lastPriceUpdate = 0;
 
-const MIN_LIQUIDITY_USD = 40.0; // Senin güncellediğin likidite filtresi
+const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 60000;
 const BUY_AMOUNT = 0.5;
@@ -54,7 +54,8 @@ async function updateTonPrice() {
       {
         params: {
           ids: 'the-open-network',
-          vs_currencies: 'usd'
+          vs_currencies: 'usd',
+          _t: Date.now()
         },
         timeout: 8000
       }
@@ -178,7 +179,7 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) {}
 }
 
-// Kararlı ve Düzeltilmiş Çift DEX Tarama Fonksiyonu
+// Cache Korumalı, Taze Veri Çeken Çift DEX Tarama Fonksiyonu
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     await updateTonPrice();
@@ -188,12 +189,13 @@ async function fetchNewTonPools(applyFilter = true) {
   const normalizedGram = normalizeAddress(GRAM_MASTER_ADDRESS);
   const gramUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
-  // 1. STON.fi Taraması
+  // 1. STON.fi Taraması (Cache Engelleme Parametresiyle)
   try {
     const { stonApi } = await getCtx();
-    const poolsList = await stonApi.getPools();
+    // SDK veya doğrudan axios ile cache patlatma
+    const poolsList = await stonApi.getPools({ params: { _t: Date.now() } }).catch(() => stonApi.getPools());
     
-    const stonPools = poolsList.map(p => {
+    const stonPools = (poolsList || []).map(p => {
       if (p.deprecated) return null;
       
       const asset0 = normalizeAddress(p.token0Address);
@@ -236,9 +238,9 @@ async function fetchNewTonPools(applyFilter = true) {
     allPools.push(...stonPools);
   } catch (error) {}
 
-  // 2. DeDust v2 Kararlı Taraması (Düzeltildi)
+  // 2. DeDust v2 Taraması (Cache Engelleme Parametresiyle)
   try {
-    const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
+    const dedustRes = await axios.get(`https://api.dedust.io/v2/pools?_t=${Date.now()}`, { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
 
     const dedustPools = dedustPoolsList.map(p => {
@@ -502,4 +504,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Stabil Çift DEX Sniper Bot hazır.");
+console.log("Kesintisiz ve Cache Korumalı Çift DEX Sniper Bot hazır.");
