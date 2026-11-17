@@ -17,7 +17,7 @@ if (!TOKEN || !ALLOWED_USER_ID) {
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
+const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UHmG_O";
 let allowedPtonAddresses = [];
 
 let GRAM_PRICE_USD = 0;
