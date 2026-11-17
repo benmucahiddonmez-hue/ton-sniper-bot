@@ -86,7 +86,7 @@ async function updateGramPrice() {
     if (!gram) {
       throw new Error("CoinMarketCap GRAM kaydı bulunamadı.");
     }
-
+    console.log("CMC HAM YANIT:", JSON.stringify(response.data, null, 2));
     const price = Number(gram.quote?.USD?.price);
 
     if (!Number.isFinite(price) || price <= 0) {
