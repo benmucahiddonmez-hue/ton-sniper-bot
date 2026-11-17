@@ -1,19 +1,21 @@
 {
   "name": "ton-sniper-bot",
   "version": "1.0.0",
-  "description": "Production-Ready Multi-DEX TON Sniper Bot with DEX-Specific Swap Payloads and MongoDB Persistence",
+  "description": "SDK Tabanlı TON Sniper Bot",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
+    "@dedust/sdk": "^1.1.0",
+    "@ston-fi/api": "^0.1.0",
+    "@ston-fi/sdk": "^1.0.0",
+    "@ton/core": "^0.56.0",
     "@ton/crypto": "^3.2.0",
     "@ton/ton": "^15.0.0",
-    "axios": "^1.7.9",
-    "mongodb": "^6.3.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.5",
+    "mongodb": "^6.8.0",
     "node-telegram-bot-api": "^0.66.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
