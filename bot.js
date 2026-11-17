@@ -1,4 +1,4 @@
-// bot.js - Kesintisiz, Cache Korumalı Çift DEX Sniper Bot
+// bot.js - Şeffaf Log Destekli Çift DEX Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -10,7 +10,6 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// Gram master kontrat adresi
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 
 if (!TOKEN || !ALLOWED_USER_ID) {
@@ -46,24 +45,17 @@ function normalizeAddress(addr) {
   }
 }
 
-// CoinGecko'dan Güncel TON Fiyatını Çeken Fonksiyon
 async function updateTonPrice() {
   try {
     const response = await axios.get(
       'https://api.coingecko.com/api/v3/simple/price',
       {
-        params: {
-          ids: 'the-open-network',
-          vs_currencies: 'usd',
-          _t: Date.now()
-        },
+        params: { ids: 'the-open-network', vs_currencies: 'usd' },
         timeout: 8000
       }
     );
-
     const price = Number(response.data?.['the-open-network']?.usd);
     if (!Number.isFinite(price) || price <= 0) throw new Error("Geçersiz TON fiyatı");
-
     TON_PRICE_USD = price;
     lastPriceUpdate = Date.now();
     return true;
@@ -179,7 +171,7 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) {}
 }
 
-// Cache Korumalı, Taze Veri Çeken Çift DEX Tarama Fonksiyonu
+// Orijinal ve Çalışan fetchNewTonPools Fonksiyonu
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     await updateTonPrice();
@@ -189,20 +181,19 @@ async function fetchNewTonPools(applyFilter = true) {
   const normalizedGram = normalizeAddress(GRAM_MASTER_ADDRESS);
   const gramUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
-  // 1. STON.fi Taraması (Cache Engelleme Parametresiyle)
+  // 1. STON.fi Taraması
   try {
     const { stonApi } = await getCtx();
-    // SDK veya doğrudan axios ile cache patlatma
-    const poolsList = await stonApi.getPools({ params: { _t: Date.now() } }).catch(() => stonApi.getPools());
+    const poolsList = await stonApi.getPools();
     
-    const stonPools = (poolsList || []).map(p => {
+    const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
       
       const asset0 = normalizeAddress(p.token0Address);
       const asset1 = normalizeAddress(p.token1Address);
 
-      const isNative0 = p.lpFee?.toString().includes("native") || asset0?.includes("native") || p.isNative0 || asset0.includes("eqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==2");
-      const isNative1 = p.lpFee?.toString().includes("native") || asset1?.includes("native") || p.isNative1 || asset1.includes("eqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==2");
+      const isNative0 = p.lpFee?.toString().includes("native") || asset0?.includes("native") || p.isNative0;
+      const isNative1 = p.lpFee?.toString().includes("native") || asset1?.includes("native") || p.isNative1;
 
       const isGram0 = asset0 === normalizedGram;
       const isGram1 = asset1 === normalizedGram;
@@ -238,40 +229,31 @@ async function fetchNewTonPools(applyFilter = true) {
     allPools.push(...stonPools);
   } catch (error) {}
 
-  // 2. DeDust v2 Taraması (Cache Engelleme Parametresiyle)
+  // 2. DeDust v2 Taraması
   try {
-    const dedustRes = await axios.get(`https://api.dedust.io/v2/pools?_t=${Date.now()}`, { timeout: 8000 });
+    const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
 
     const dedustPools = dedustPoolsList.map(p => {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
 
-      const asset0Obj = assets[0];
-      const asset1Obj = assets[1];
+      const asset0Addr = normalizeAddress(assets[0].address || (assets[0].type === 'native' ? 'native' : ''));
+      const asset1Addr = normalizeAddress(assets[1].address || (assets[1].type === 'native' ? 'native' : ''));
 
-      const asset0Addr = normalizeAddress(asset0Obj.address || (asset0Obj.type === 'native' ? 'native' : ''));
-      const asset1Addr = normalizeAddress(asset1Obj.address || (asset1Obj.type === 'native' ? 'native' : ''));
-
-      const isNative0 = asset0Obj.type === 'native' || asset0Addr === 'native';
-      const isNative1 = asset1Obj.type === 'native' || asset1Addr === 'native';
-
-      const isGram0 = asset0Addr === normalizedGram;
-      const isGram1 = asset1Addr === normalizedGram;
-
-      const hasTon = isNative0 || isNative1;
-      const hasGram = isGram0 || isGram1;
+      const hasTon = asset0Addr === 'native' || asset1Addr === 'native';
+      const hasGram = asset0Addr === normalizedGram || asset1Addr === normalizedGram;
 
       if (!hasTon && !hasGram) return null;
 
-      const reserve0 = Number(p.r0 || asset0Obj.reserve || 0) / 1e9;
-      const reserve1 = Number(p.r1 || asset1Obj.reserve || 0) / 1e9;
+      const reserve0 = Number(p.r0 || assets[0].reserve || 0) / 1e9;
+      const reserve1 = Number(p.r1 || assets[1].reserve || 0) / 1e9;
 
       let rTonLike = 0;
       if (hasTon) {
-        rTonLike = isNative0 ? reserve0 : reserve1;
+        rTonLike = asset0Addr === 'native' ? reserve0 : reserve1;
       } else if (hasGram) {
-        const gramRes = isGram0 ? reserve0 : reserve1;
+        const gramRes = asset0Addr === normalizedGram ? reserve0 : reserve1;
         rTonLike = (gramRes * gramUsd) / (TON_PRICE_USD > 0 ? TON_PRICE_USD : 1.05);
       }
 
@@ -279,7 +261,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
       const tokenAsset = assets.find(a => {
         const addr = normalizeAddress(a.address || (a.type === 'native' ? 'native' : ''));
-        return addr !== 'native' && addr !== normalizedGram && a.type !== 'native';
+        return addr !== 'native' && addr !== normalizedGram;
       });
 
       if (!tokenAsset || !tokenAsset.address) return null;
@@ -298,7 +280,6 @@ async function fetchNewTonPools(applyFilter = true) {
     allPools.push(...dedustPools);
   } catch (error) {}
 
-  console.log(`🔍 [HAVUZ TARAMA] STON.fi + DeDust taranıyor | Kriterlere uyan toplam havuz: ${allPools.length}`);
   return allPools;
 }
 
@@ -371,6 +352,16 @@ async function startSniperWorkerLoop() {
           await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
           continue;
         }
+
+        // Seninki ile birebir uyumlu şeffaf log bloğu
+        const countBy = (list, dex) => list.filter(p => p && p.dex === dex).length;
+        const newPools = pools.filter(p => p && !seenPools[p.address]);
+        const pendingPools = pools.filter(p => p && seenPools[p.address]?.status === 'pending');
+
+        console.log(
+          `🔎 [STON.fi] Yeni: ${countBy(newPools, 'stonfi')} | Bekleyen: ${countBy(pendingPools, 'stonfi')} | Toplam uygun: ${countBy(pools, 'stonfi')}\n` +
+          `🔎 [DeDust]  Yeni: ${countBy(newPools, 'dedust')} | Bekleyen: ${countBy(pendingPools, 'dedust')} | Toplam uygun: ${countBy(pools, 'dedust')}`
+        );
 
         for (const pool of pools) {
           if (!botRunning) break;
@@ -460,7 +451,7 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Stabil Sniper Bot Başlatıldı!**\n\n` +
+        `🚀 **Şeffaf Loglu Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -504,4 +495,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Kesintisiz ve Cache Korumalı Çift DEX Sniper Bot hazır.");
+console.log("Şeffaf Log Destekli Sniper Bot hazır.");
