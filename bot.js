@@ -157,7 +157,7 @@ async function initDatabase() {
       tls: true,
       tlsAllowInvalidCertificates: true,
       retryWrites: true,
-      serverSelectionTimeoutMS: 5000
+      serverSelectionTimeoutMS: 10000
     });
 
     await dbClient.connect();
