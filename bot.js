@@ -1,4 +1,4 @@
-// bot.js - Gram ve Fiyat Bilgileri Tam Entegre Edilmiş Son Hali
+// bot.js - Kesinleştirilmiş, Debug Loglu ve Tam Entegre Production Botu
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -76,32 +76,70 @@ async function updateTonPrice() {
   }
 }
 
-// Cüzdan TON, Gram Bakiye ve STON.fi Gram Fiyatını Çeken Yardımcı Fonksiyon
+// Cüzdan TON, Gram Bakiye ve STON.fi Gram Fiyatını Çeken Debug Loglu Fonksiyon
 async function getWalletAndGramStats(walletAddress) {
+    let balanceTon = 0;
+    let gramBalance = 0;
+    let gramPriceUsd = 1.05; // Fallback
+
     try {
         const { client, stonApi } = await getCtx();
         
-        // 1. Yerel TON Bakiyesi
-        const balanceNano = await client.getBalance(walletAddress);
-        const balanceTon = Number(balanceNano) / 1e9;
-
-        // 2. Gram (Jetton) Bakiyesi
-        const gramRawBalance = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS);
-        const gramBalance = Number(gramRawBalance) / 1e9;
-
-        // 3. STON.fi Üzerinden Gram Fiyatı ($ cinsinden)
-        let gramPriceUsd = 0;
-        try {
-            const asset = await stonApi.getAsset(GRAM_MASTER_ADDRESS);
-            gramPriceUsd = Number(asset?.dexPriceUsd ?? asset?.dexUsdPrice ?? 1.05);
-        } catch (e) {
-            gramPriceUsd = 1.05; // Fallback fiyat
+        // 0. Önce TON fiyatını garantileyelim (Simülasyon hesabı için gerekli)
+        if (TON_PRICE_USD <= 0) {
+            await updateTonPrice();
         }
 
-        return { balanceTon, gramBalance, gramPriceUsd };
+        // 1. TON Bakiyesi
+        const balanceNano = await client.getBalance(walletAddress);
+        balanceTon = Number(balanceNano) / 1e9;
+
+        // 2. Gram Bakiye
+        try {
+            const rawGramBal = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS);
+            gramBalance = Number(rawGramBal) / 1e9;
+        } catch (e) {
+            console.error("Gram bakiye çekilemedi:", e.message);
+        }
+
+        // 3. Gram Fiyatı Hesabı
+        try {
+            const asset = await stonApi.getAsset(GRAM_MASTER_ADDRESS);
+            gramPriceUsd = Number(asset?.dexPriceUsd ?? asset?.dexUsdPrice ?? asset?.priceUsd ?? 0);
+
+            if (gramPriceUsd <= 0) {
+                const oneGramNano = 1000000000n;
+                const routers = await stonApi.getRouters();
+                const routerAddress = routers?.[0]?.address;
+                
+                if (routerAddress) {
+                    const simulate = await stonApi.simulateSwap({
+                        dexRouterAddress: routerAddress,
+                        offerAddress: GRAM_MASTER_ADDRESS,
+                        askAddress: "native",
+                        units: oneGramNano.toString()
+                    }).catch(() => null);
+
+                    const askUnits = simulate?.minAskUnits || simulate?.askUnits;
+                    if (askUnits && TON_PRICE_USD > 0) {
+                        const priceInTon = Number(askUnits) / 1e9;
+                        gramPriceUsd = priceInTon * TON_PRICE_USD;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Gram fiyat simülasyon hatası:", e.message);
+        }
+
+        if (gramPriceUsd <= 0) gramPriceUsd = 1.05;
+
+        console.log(`[DEBUG STATS] TON: ${balanceTon}, Gram: ${gramBalance}, Gram USD: ${gramPriceUsd}`);
+
     } catch (err) {
-        return { balanceTon: 0, gramBalance: 0, gramPriceUsd: 1.05 };
+        console.error("getWalletAndGramStats genel hata:", err.message);
     }
+
+    return { balanceTon, gramBalance, gramPriceUsd };
 }
 
 // State Reconciliation (Durum Senkronizasyonu)
@@ -363,7 +401,7 @@ async function sniperWorker() {
   }
 }
 
-// /baslat Komutu (Gram ve Fiyat Göstergeli)
+// /baslat Komutu
 bot.onText(/\/baslat/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   if (!botRunning) {
@@ -403,7 +441,7 @@ bot.onText(/\/durdur/, (msg) => {
   });
 });
 
-// /bakiye Komutu (Gram ve Fiyat Göstergeli)
+// /bakiye Komutu
 bot.onText(/\/bakiye/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   try {
