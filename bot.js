@@ -19,7 +19,8 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
-const SCAN_INTERVAL = 15000;
+const SCAN_INTERVAL = 30000; // 30 saniye (Dakikada 2 kontrol)
+
 
 const TAKE_PROFIT_PERCENT = 35.0; // +%35 Kâr Al
 const STOP_LOSS_PERCENT = 25.0;  // -%25 Zarar Durdur
