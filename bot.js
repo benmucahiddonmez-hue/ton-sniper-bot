@@ -1,4 +1,4 @@
-// bot.js - Canlı Tarama Loglu & Akıllı Fiyat Senkronizasyonlu Çift DEX Sniper Bot
+// bot.js - Kesintisiz, Asla Kilitlenmeyen Çift DEX & Çift Tabanlı Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -23,7 +23,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 let TON_PRICE_USD = 0;
 let lastPriceUpdate = 0;
 
-const MIN_LIQUIDITY_USD = 40.0;
+const MIN_LIQUIDITY_USD = 100.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 60000;
 const BUY_AMOUNT = 0.5;
@@ -46,7 +46,7 @@ function normalizeAddress(addr) {
   }
 }
 
-// CoinGecko'dan Güncel TON Fiyatını Çeken ve Bota Entegre Eden Fonksiyon
+// CoinGecko'dan Güncel TON Fiyatını Çeken Fonksiyon
 async function updateTonPrice() {
   try {
     console.log("🔄 [FİYAT] CoinGecko üzerinden güncel TON fiyatı sorgulanıyor...");
@@ -75,7 +75,7 @@ async function updateTonPrice() {
   } catch (error) {
     console.error("⚠️ TON fiyat güncelleme hatası:", error.message);
     if (TON_PRICE_USD <= 0) {
-      TON_PRICE_USD = 5.0; // Fallback acil durum fiyatı
+      TON_PRICE_USD = 5.0; 
       console.log(`⚠️ [FALLBACK] TON fiyatı alınamadığı için geçici varsayılan değer kullanılıyor: $${TON_PRICE_USD}`);
     }
     return false;
@@ -86,22 +86,15 @@ async function updateTonPrice() {
 async function getWalletAndGramStats(walletAddress) {
     let balanceTon = 0;
     let gramBalance = 0;
-    
-    // Railway değişkeninden (GRAM_MANUAL_PRICE) fiyatı doğrudan alıyoruz
     let gramPriceUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
     try {
         const { client } = await getCtx();
-        
-        if (TON_PRICE_USD <= 0) {
-            await updateTonPrice();
-        }
+        if (TON_PRICE_USD <= 0) { await updateTonPrice(); }
 
-        // 1. TON Bakiyesi
         const balanceNano = await client.getBalance(walletAddress);
         balanceTon = Number(balanceNano) / 1e9;
 
-        // 2. Dinamik Gram Bakiye (Cüzdan envanterinden akıllı arama)
         try {
             const tonapiKey = process.env.TONAPI_KEY;
             const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
@@ -124,9 +117,6 @@ async function getWalletAndGramStats(walletAddress) {
         } catch (e) {
             console.error("Gram bakiye çekilemedi:", e.message);
         }
-
-        console.log(`[DEBUG STATS] TON: ${balanceTon}, Gram: ${gramBalance}, Gram USD: ${gramPriceUsd}`);
-
     } catch (err) {
         console.error("getWalletAndGramStats genel hata:", err.message);
     }
@@ -134,7 +124,6 @@ async function getWalletAndGramStats(walletAddress) {
     return { balanceTon, gramBalance, gramPriceUsd };
 }
 
-// State Reconciliation (Veritabanı & Cüzdan Senkronizasyonu)
 async function reconcilePositions() {
     if (!positionsCollection) return;
     try {
@@ -212,7 +201,7 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) { console.error("DB Havuz Kayıt Hatası:", err.message); }
 }
 
-// 🌐 Canlı Log Destekli Çift Tabanlı Tarama (TON + GRAM - STON.fi + DeDust)
+// Canlı Log Destekli Çift Tabanlı Tarama (TON + GRAM - STON.fi + DeDust)
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     await updateTonPrice();
@@ -388,13 +377,13 @@ async function monitorPositions() {
   }
 }
 
-// Güvenli ve Kendini Kurtaran (Self-Healing) Ana Sniper Worker
+// KESİNTİSİZ & ASLA KİLİTLENMEYEN (BULLETPROOF) ANA WORKER
 async function startSniperWorkerLoop() {
   while (botRunning) {
     try {
       console.log("🚀 Sniper Worker döngüsü başlatılıyor...");
       
-      monitorPositions();
+      monitorPositions().catch(err => console.error("Monitor hatası:", err.message));
       await updateTonPrice();
 
       let initialPools = await fetchNewTonPools(false);
@@ -438,28 +427,21 @@ async function startSniperWorkerLoop() {
           
           const elapsed = now - poolInfo.firstSeen;
           if (elapsed < POOL_MATURITY_DELAY) {
-            console.log(`⏳ [BEKLEME] Havuz olgunlaşıyor... (${Math.floor((POOL_MATURITY_DELAY - elapsed) / 1000)}s kaldı) -> ${poolAddr}`);
             continue;
           }
 
           console.log(`🛡️ [GÜVENLİK KONTROLÜ] Havuz olgunlaştı, güvenlik taraması yapılıyor: ${tokenAddr}`);
           const safety = await checkSafetyWithSimulation(tokenAddr);
-          if (safety.transient) {
-            console.log(`⚠️ [GEÇİCİ HATA] API yanıt vermedi, sonraki turda tekrar denenecek.`);
-            continue;
-          }
+          if (safety.transient) continue;
 
           if (safety.safe) {
-            console.log(`✅ [GÜVENLİ] Token temiz! Fiyat etkisi (Price Impact) hesaplanıyor...`);
             const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
             if (impact > 5) {
-              console.log(`❌ [İPTAL] Fiyat etkisi çok yüksek (%${impact.toFixed(2)} > %5). Havuz es geçiliyor.`);
               poolInfo.status = 'failed_permanently';
               await saveSeenPoolToDb(poolAddr, poolInfo);
               continue;
             }
 
-            console.log(`🚀 [ALIM BAŞLATILIYOR] ${BUY_AMOUNT} TON değerinde alım emri gönderiliyor...`);
             const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
             if (buyResult.success) {
               poolInfo.status = 'bought';
@@ -477,12 +459,10 @@ async function startSniperWorkerLoop() {
                 await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
               } catch (e) {}
             } else {
-              console.log(`❌ [ALIM BAŞARISIZ] Swap işlemi gerçekleştirilemedi.`);
               poolInfo.status = 'failed_permanently';
               await saveSeenPoolToDb(poolAddr, poolInfo);
             }
           } else {
-            console.log(`🚨 [RUGPULL / TEHLİKE] Token güvenli değil: ${safety.reason}`);
             poolInfo.status = 'failed_permanently';
             await saveSeenPoolToDb(poolAddr, poolInfo);
           }
@@ -501,7 +481,7 @@ async function startSniperWorkerLoop() {
   }
 }
 
-// /baslat Komutu
+// Telegram Komutları
 bot.onText(/\/baslat/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   
@@ -519,7 +499,7 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Canlı Tarama Loglu Sniper Bot Başlatıldı!**\n\n` +
+        `🚀 **Kesintisiz Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -536,7 +516,6 @@ bot.onText(/\/baslat/, async (msg) => {
   }
 });
 
-// /durdur Komutu
 bot.onText(/\/durdur/, (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   botRunning = false;
@@ -546,7 +525,6 @@ bot.onText(/\/durdur/, (msg) => {
   });
 });
 
-// /bakiye Komutu
 bot.onText(/\/bakiye/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   try {
@@ -566,4 +544,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Canlı Tarama Loglu Çift DEX Sniper Bot hazır.");
+console.log("Kesintisiz Çift DEX Sniper Bot hazır.");
