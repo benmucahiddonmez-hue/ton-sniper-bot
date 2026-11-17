@@ -19,7 +19,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 const MIN_LIQUIDITY_USD = 40.0;
-const SCAN_INTERVAL = 30000;
+const SCAN_INTERVAL = 45000; // Tarama aralığı spam'i önlemek için 45 saniyeye çıkarıldı
 
 const DEDUST_ROUTER_ADDRESS = "EQBfqqxGuNpzSw7A0eA1uQyQf5yR2K9V0F3U1z4y4tQ2M8Z2";
 const STONFI_ROUTER_ADDRESS = "EQBU_sco9W55jQGz9b-3pQ63F_G8D9C0nC5pP1N3J4V2Q8Xk";
@@ -39,7 +39,6 @@ async function initDatabase() {
         return;
     }
     try {
-        // SSL Alert 80 ve sertifika hatalarını önleyen yapılandırma
         dbClient = new MongoClient(MONGODB_URI, {
             tls: true,
             tlsAllowInvalidCertificates: true,
@@ -275,18 +274,14 @@ async function sniperWorker() {
 
             if (!tokenAddr || tokenAddr === GRAM_MASTER_ADDRESS || activePositions[tokenAddr]) continue;
 
-            if (!seenPools[poolAddr]) {
-                await saveSeenPoolToDb(poolAddr, { bought: false, firstSeen: Date.now() });
+            // Kesin Spam Koruması: Havuz hafızada veya DB'de varsa tekrar işleme alma
+            if (seenPools[poolAddr]) {
                 continue; 
             }
 
-            let poolInfo = seenPools[poolAddr];
-            if (poolInfo.bought) continue;
-
-            if (Date.now() - poolInfo.firstSeen < 60000) continue; 
-
-            poolInfo.bought = true;
-            await saveSeenPoolToDb(poolAddr, poolInfo);
+            // Havuz ilk kez görülüyor, hemen işareteleyip kaydediyoruz
+            seenPools[poolAddr] = { bought: true, firstSeen: Date.now() };
+            await saveSeenPoolToDb(poolAddr, { bought: true, firstSeen: Date.now() });
 
             const safety = await checkSafetyWithSimulation(pool);
             if (safety.safe) {
@@ -310,7 +305,7 @@ bot.onText(/\/baslat/, async (msg) => {
         await initDatabase();
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🛡️ MongoDB SSL Bağlantısı ve Spam Koruması Devrede.", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🛡️ Spam Koruması ve Güvenli Tarama Devrede.", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -338,6 +333,6 @@ bot.onText(/\/bakiye/, async (msg) => {
     }
 });
 
-console.log("Sniper Bot tam sürümle başlatıldı...");
+console.log("Sniper Bot güncellenmiş sürümle hazır...");
 process.on('uncaughtException', (err) => {});
 process.on('unhandledRejection', (err) => {});
