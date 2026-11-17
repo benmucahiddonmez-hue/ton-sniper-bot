@@ -39,7 +39,14 @@ async function initDatabase() {
         return;
     }
     try {
-        dbClient = new MongoClient(MONGODB_URI, { tlsAllowInvalidCertificates: true });
+        // SSL Alert 80 ve sertifika hatalarını önleyen yapılandırma
+        dbClient = new MongoClient(MONGODB_URI, {
+            tls: true,
+            tlsAllowInvalidCertificates: true,
+            tlsAllowInvalidHostnames: true,
+            retryWrites: true
+        });
+
         await dbClient.connect();
         const db = dbClient.db("ton_sniper_db");
         
@@ -61,9 +68,7 @@ async function initDatabase() {
 async function savePositionToDb(tokenAddress, posData) {
     activePositions[tokenAddress] = posData;
     if (positionsCollection) {
-        try {
-            await positionsCollection.updateOne({ tokenAddress }, { $set: { tokenAddress, ...posData } }, { upsert: true });
-        } catch (err) {}
+        try { await positionsCollection.updateOne({ tokenAddress }, { $set: { tokenAddress, ...posData } }, { upsert: true }); } catch (err) {}
     }
 }
 
@@ -77,19 +82,13 @@ async function removePositionFromDb(tokenAddress) {
 async function saveSeenPoolToDb(poolAddr, poolData) {
     seenPools[poolAddr] = poolData;
     if (seenPoolsCollection) {
-        try {
-            await seenPoolsCollection.updateOne({ poolAddr }, { $set: { poolAddr, ...poolData } }, { upsert: true });
-        } catch (err) {}
+        try { await seenPoolsCollection.updateOne({ poolAddr }, { $set: { poolAddr, ...poolData } }, { upsert: true }); } catch (err) {}
     }
 }
 
 async function getWalletClient() {
     if (!WALLET_MNEMONIC) throw new Error("WALLET_MNEMONIC tanımlanmamış!");
-    const client = new TonClient({
-        endpoint: 'https://toncenter.com/api/v2/jsonRPC',
-        apiKey: TONAPI_KEY 
-    });
-
+    const client = new TonClient({ endpoint: 'https://toncenter.com/api/v2/jsonRPC', apiKey: TONAPI_KEY });
     const mnemonics = WALLET_MNEMONIC.trim().split(/\s+/);
     const keyPair = await mnemonicToPrivateKey(mnemonics);
     const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
@@ -99,9 +98,7 @@ async function getWalletClient() {
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
     try {
         const headers = TONAPI_KEY ? { Authorization: `Bearer ${TONAPI_KEY}` } : {};
-        const url = `https://tonapi.io/v2/accounts/${walletAddress}/jettons`;
-        const res = await axios.get(url, { headers, timeout: 8000 });
-        
+        const res = await axios.get(`https://tonapi.io/v2/accounts/${walletAddress}/jettons`, { headers, timeout: 8000 });
         const balances = res.data?.balances || [];
         const tokenBalanceObj = balances.find(b => b.jetton.address.toLowerCase() === tokenAddress.toLowerCase());
         
@@ -120,7 +117,6 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
 
 async function fetchNewGramPools() {
     let allPools = [];
-
     try {
         const stonRes = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
         const stonPools = (stonRes.data?.pool_list || []).map(p => ({
@@ -172,11 +168,10 @@ async function checkSafetyWithSimulation(pool) {
         return { safe: true, token: pool.base_token_address, dex: pool.dex };
     }
 }
+
 async function executeBuySwap(tokenAddress, amountTon, dexType) {
     try {
-        console.log(`Alım Başlatılıyor [${dexType.toUpperCase()}] -> Token: ${tokenAddress}`);
         const { client, wallet } = await getWalletClient();
-        
         const balanceNano = await client.getBalance(wallet.address);
         const amountNano = BigInt(Math.floor(amountTon * 1e9));
         
@@ -315,7 +310,7 @@ bot.onText(/\/baslat/, async (msg) => {
         await initDatabase();
         botRunning = true;
         sniperWorker();
-        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🛡️ İki Parçalı Eksiksiz Sürüm Çalışıyor.", { parse_mode: "Markdown" });
+        bot.sendMessage(msg.chat.id, "🚀 **Bot Aktif!**\n🛡️ MongoDB SSL Bağlantısı ve Spam Koruması Devrede.", { parse_mode: "Markdown" });
     } else {
         bot.sendMessage(msg.chat.id, "⚠️ Bot zaten çalışıyor.");
     }
@@ -343,6 +338,6 @@ bot.onText(/\/bakiye/, async (msg) => {
     }
 });
 
-console.log("Sniper Bot başarıyla başlatıldı...");
+console.log("Sniper Bot tam sürümle başlatıldı...");
 process.on('uncaughtException', (err) => {});
 process.on('unhandledRejection', (err) => {});
