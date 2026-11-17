@@ -1,4 +1,4 @@
-// bot.js - Çift DEX (STON.fi + DeDust) Production Sniper & Portfolio Bot
+// bot.js - Çift DEX (STON.fi + DeDust) & Çift Tabanlı (TON + GRAM) Production Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -76,14 +76,16 @@ async function updateTonPrice() {
   }
 }
 
-// Cüzdan TON, Dinamik Gram Bakiye ve Fiyat Bilgisi
+// Cüzdan TON, Dinamik Gram Bakiye ve Railway'den Gelen Sabit Gram Fiyatı
 async function getWalletAndGramStats(walletAddress) {
     let balanceTon = 0;
     let gramBalance = 0;
-    let gramPriceUsd = 1.05; // Fallback
+    
+    // Railway değişkeninden (GRAM_MANUAL_PRICE) fiyatı doğrudan alıyoruz
+    let gramPriceUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
     try {
-        const { client, stonApi } = await getCtx();
+        const { client } = await getCtx();
         
         if (TON_PRICE_USD <= 0) {
             await updateTonPrice();
@@ -116,37 +118,6 @@ async function getWalletAndGramStats(walletAddress) {
         } catch (e) {
             console.error("Gram bakiye çekilemedi:", e.message);
         }
-
-        // 3. Gram Fiyatı Hesabı
-        try {
-            const asset = await stonApi.getAsset(GRAM_MASTER_ADDRESS);
-            gramPriceUsd = Number(asset?.dexPriceUsd ?? asset?.dexUsdPrice ?? asset?.priceUsd ?? 0);
-
-            if (gramPriceUsd <= 0) {
-                const oneGramNano = 1000000000n;
-                const routers = await stonApi.getRouters();
-                const routerAddress = routers?.[0]?.address;
-                
-                if (routerAddress) {
-                    const simulate = await stonApi.simulateSwap({
-                        dexRouterAddress: routerAddress,
-                        offerAddress: GRAM_MASTER_ADDRESS,
-                        askAddress: "native",
-                        units: oneGramNano.toString()
-                    }).catch(() => null);
-
-                    const askUnits = simulate?.minAskUnits || simulate?.askUnits;
-                    if (askUnits && TON_PRICE_USD > 0) {
-                        const priceInTon = Number(askUnits) / 1e9;
-                        gramPriceUsd = priceInTon * TON_PRICE_USD;
-                    }
-                }
-            }
-        } catch (e) {
-            console.error("Gram fiyat simülasyon hatası:", e.message);
-        }
-
-        if (gramPriceUsd <= 0) gramPriceUsd = 1.05;
 
         console.log(`[DEBUG STATS] TON: ${balanceTon}, Gram: ${gramBalance}, Gram USD: ${gramPriceUsd}`);
 
@@ -185,7 +156,7 @@ async function initDatabase() {
   try {
     dbClient = new MongoClient(MONGODB_URI, {
       tls: true,
-      tlsInsecure: true, // tlsAllowInvalidCertificates kaldırıldı, bu tek başına yeterlidir
+      tlsInsecure: true, // TLS çakışması önlendi
       retryWrites: true,
       serverSelectionTimeoutMS: 5000
     });
@@ -211,7 +182,6 @@ async function initDatabase() {
   }
 }
 
-
 async function savePositionToDb(tokenAddress, posData) {
   activePositions[tokenAddress] = posData;
   if (!positionsCollection) return;
@@ -236,7 +206,7 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) { console.error("DB Havuz Kayıt Hatası:", err.message); }
 }
 
-// 🌐 ÇİFT DEX Taraması: STON.fi + DeDust v2
+// 🌐 ÇİFT TABANLI TARAMA: STON.fi + DeDust v2 (TON veya GRAM Destekli)
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     const updated = await updateTonPrice();
@@ -244,8 +214,10 @@ async function fetchNewTonPools(applyFilter = true) {
   }
 
   let allPools = [];
+  const normalizedGram = normalizeAddress(GRAM_MASTER_ADDRESS);
+  const gramUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
-  // 1. STON.fi Taraması
+  // 1. STON.fi Taraması (TON veya GRAM tabanlı çiftler)
   try {
     const { stonApi } = await getCtx();
     const poolsList = await stonApi.getPools();
@@ -253,26 +225,40 @@ async function fetchNewTonPools(applyFilter = true) {
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
       
-      const asset0 = p.token0Address;
-      const asset1 = p.token1Address;
+      const asset0 = normalizeAddress(p.token0Address);
+      const asset1 = normalizeAddress(p.token1Address);
 
       const isNative0 = p.lpFee?.toString().includes("native") || asset0?.includes("native") || p.isNative0;
       const isNative1 = p.lpFee?.toString().includes("native") || asset1?.includes("native") || p.isNative1;
 
-      const rTon = Number(isNative0 ? p.reserve0 : (isNative1 ? p.reserve1 : 0)) / 1e9;
-      if (rTon <= 0) return null;
+      const isGram0 = asset0 === normalizedGram;
+      const isGram1 = asset1 === normalizedGram;
 
-      const baseTokenAddress = isNative0 ? asset1 : asset0;
-      if (!baseTokenAddress) return null;
+      const hasBase = isNative0 || isNative1 || isGram0 || isGram1;
+      if (!hasBase) return null;
 
-      const reserveUsd = rTon * 2 * TON_PRICE_USD;
+      let rTonLike = 0;
+      if (isNative0) rTonLike = Number(p.reserve0) / 1e9;
+      else if (isNative1) rTonLike = Number(p.reserve1) / 1e9;
+      else if (isGram0) rTonLike = (Number(p.reserve0) / 1e9) * gramUsd / TON_PRICE_USD;
+      else if (isGram1) rTonLike = (Number(p.reserve1) / 1e9) * gramUsd / TON_PRICE_USD;
+
+      if (rTonLike <= 0) return null;
+
+      let baseTokenAddress = null;
+      if (isNative0 || isGram0) baseTokenAddress = asset1;
+      else baseTokenAddress = asset0;
+
+      if (!baseTokenAddress || baseTokenAddress === normalizedGram) return null;
+
+      const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
 
       return {
         address: p.address,
         dex: 'stonfi',
-        name: 'TOKEN/TON (STON.fi)',
+        name: `TOKEN/${isGram0 || isGram1 ? 'GRAM' : 'TON'} (STON.fi)`,
         reserve_in_usd: reserveUsd,
-        base_token_address: normalizeAddress(baseTokenAddress)
+        base_token_address: baseTokenAddress
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
     
@@ -281,7 +267,7 @@ async function fetchNewTonPools(applyFilter = true) {
     console.error("STON.fi tarama hatası:", error.message);
   }
 
-  // 2. DeDust v2 Taraması (Canlı API Verisi)
+  // 2. DeDust v2 Taraması (TON veya GRAM tabanlı çiftler)
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
@@ -290,23 +276,40 @@ async function fetchNewTonPools(applyFilter = true) {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
 
-      const hasTon = assets.some(a => a.type === 'native' || a.address === 'native');
-      if (!hasTon) return null;
+      const asset0Addr = normalizeAddress(assets[0].address || (assets[0].type === 'native' ? 'native' : ''));
+      const asset1Addr = normalizeAddress(assets[1].address || (assets[1].type === 'native' ? 'native' : ''));
 
-      const tonAsset = assets.find(a => a.type === 'native' || a.address === 'native');
-      const tokenAsset = assets.find(a => a !== tonAsset);
+      const hasTon = asset0Addr === 'native' || asset1Addr === 'native';
+      const hasGram = asset0Addr === normalizedGram || asset1Addr === normalizedGram;
+
+      if (!hasTon && !hasGram) return null;
+
+      const reserve0 = Number(p.r0 || assets[0].reserve || 0) / 1e9;
+      const reserve1 = Number(p.r1 || assets[1].reserve || 0) / 1e9;
+
+      let rTonLike = 0;
+      if (hasTon) {
+        rTonLike = asset0Addr === 'native' ? reserve0 : reserve1;
+      } else if (hasGram) {
+        const gramRes = asset0Addr === normalizedGram ? reserve0 : reserve1;
+        rTonLike = (gramRes * gramUsd) / (TON_PRICE_USD > 0 ? TON_PRICE_USD : 1.05);
+      }
+
+      if (rTonLike <= 0) return null;
+
+      const tokenAsset = assets.find(a => {
+        const addr = normalizeAddress(a.address || (a.type === 'native' ? 'native' : ''));
+        return addr !== 'native' && addr !== normalizedGram;
+      });
 
       if (!tokenAsset || !tokenAsset.address) return null;
 
-      const rTon = Number(tonAsset.reserve || p.r0 || 0) / 1e9;
-      if (rTon <= 0) return null;
-
-      const reserveUsd = rTon * 2 * TON_PRICE_USD;
+      const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
 
       return {
         address: p.address || p.id,
         dex: 'dedust',
-        name: 'TOKEN/TON (DeDust)',
+        name: `TOKEN/${hasGram ? 'GRAM' : 'TON'} (DeDust)`,
         reserve_in_usd: reserveUsd,
         base_token_address: normalizeAddress(tokenAsset.address)
       };
@@ -484,7 +487,7 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Çift DEX Sniper Bot Başlatıldı!**\n\n` +
+        `🚀 **Çift DEX & Çift Tabanlı Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -531,4 +534,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Çift DEX TON Sniper Bot hazır.");
+console.log("Çift DEX & Çift Tabanlı TON/GRAM Sniper Bot hazır.");
