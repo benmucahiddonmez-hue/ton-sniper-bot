@@ -1,4 +1,4 @@
-// bot.js - Çift DEX (STON.fi + DeDust) & Çift Tabanlı (TON + GRAM) Production Sniper Bot
+// bot.js - Canlı Tarama Loglu & Akıllı Fiyat Senkronizasyonlu Çift DEX Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -23,7 +23,7 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 let TON_PRICE_USD = 0;
 let lastPriceUpdate = 0;
 
-const MIN_LIQUIDITY_USD = 100.0;
+const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 60000;
 const BUY_AMOUNT = 0.5;
@@ -46,8 +46,10 @@ function normalizeAddress(addr) {
   }
 }
 
+// CoinGecko'dan Güncel TON Fiyatını Çeken ve Bota Entegre Eden Fonksiyon
 async function updateTonPrice() {
   try {
+    console.log("🔄 [FİYAT] CoinGecko üzerinden güncel TON fiyatı sorgulanıyor...");
     const response = await axios.get(
       'https://api.coingecko.com/api/v3/simple/price',
       {
@@ -68,10 +70,14 @@ async function updateTonPrice() {
     TON_PRICE_USD = price;
     lastPriceUpdate = Date.now();
 
-    console.log(`📊 Güncel TON Fiyatı (CoinGecko): $${TON_PRICE_USD}`);
+    console.log(`📊 [FİYAT BAŞARILI] Güncel TON Fiyatı (CoinGecko): $${TON_PRICE_USD}`);
     return true;
   } catch (error) {
-    console.error("TON fiyat güncelleme hatası:", error.message);
+    console.error("⚠️ TON fiyat güncelleme hatası:", error.message);
+    if (TON_PRICE_USD <= 0) {
+      TON_PRICE_USD = 5.0; // Fallback acil durum fiyatı
+      console.log(`⚠️ [FALLBACK] TON fiyatı alınamadığı için geçici varsayılan değer kullanılıyor: $${TON_PRICE_USD}`);
+    }
     return false;
   }
 }
@@ -156,7 +162,7 @@ async function initDatabase() {
   try {
     dbClient = new MongoClient(MONGODB_URI, {
       tls: true,
-      tlsInsecure: true, // TLS çakışması önlendi
+      tlsInsecure: true,
       retryWrites: true,
       serverSelectionTimeoutMS: 5000
     });
@@ -206,22 +212,25 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   } catch (err) { console.error("DB Havuz Kayıt Hatası:", err.message); }
 }
 
-// 🌐 ÇİFT TABANLI TARAMA: STON.fi + DeDust v2 (TON veya GRAM Destekli)
+// 🌐 Canlı Log Destekli Çift Tabanlı Tarama (TON + GRAM - STON.fi + DeDust)
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
-    const updated = await updateTonPrice();
-    if (!updated && TON_PRICE_USD <= 0) throw new Error("Güncel TON fiyatı alınamadı.");
+    await updateTonPrice();
   }
+
+  console.log(`🔍 [HAVUZ TARAMA] STON.fi ve DeDust üzerinde yeni TON/GRAM havuzları taranıyor... (Filtre: ${applyFilter ? 'Aktif (Min $' + MIN_LIQUIDITY_USD + ')' : 'Pasif/İlk Tarama'})`);
 
   let allPools = [];
   const normalizedGram = normalizeAddress(GRAM_MASTER_ADDRESS);
   const gramUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
-  // 1. STON.fi Taraması (TON veya GRAM tabanlı çiftler)
+  // 1. STON.fi Taraması
   try {
     const { stonApi } = await getCtx();
     const poolsList = await stonApi.getPools();
+    console.log(`📡 [STON.fi] API'den ${poolsList?.length || 0} adet havuz ham verisi çekildi.`);
     
+    let stonMatched = 0;
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
       
@@ -252,6 +261,7 @@ async function fetchNewTonPools(applyFilter = true) {
       if (!baseTokenAddress || baseTokenAddress === normalizedGram) return null;
 
       const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
+      stonMatched++;
 
       return {
         address: p.address,
@@ -262,16 +272,19 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
     
+    console.log(`✨ [STON.fi] Kriterlere uyan ${stonMatched} geçerli havuz bulundu (Filtrelenen kalan: ${stonPools.length}).`);
     allPools.push(...stonPools);
   } catch (error) {
-    console.error("STON.fi tarama hatası:", error.message);
+    console.error("⚠️ STON.fi tarama hatası:", error.message);
   }
 
-  // 2. DeDust v2 Taraması (TON veya GRAM tabanlı çiftler)
+  // 2. DeDust v2 Taraması
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
+    console.log(`📡 [DeDust] API'den ${dedustPoolsList.length} adet havuz ham verisi çekildi.`);
 
+    let dedustMatched = 0;
     const dedustPools = dedustPoolsList.map(p => {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
@@ -305,6 +318,7 @@ async function fetchNewTonPools(applyFilter = true) {
       if (!tokenAsset || !tokenAsset.address) return null;
 
       const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
+      dedustMatched++;
 
       return {
         address: p.address || p.id,
@@ -315,11 +329,13 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
 
+    console.log(`✨ [DeDust] Kriterlere uyan ${dedustMatched} geçerli havuz bulundu (Filtrelenen kalan: ${dedustPools.length}).`);
     allPools.push(...dedustPools);
   } catch (error) {
-    console.error("DeDust tarama hatası:", error.message);
+    console.error("⚠️ DeDust tarama hatası:", error.message);
   }
 
+  console.log(`🎯 [TARAMA ÖZETİ] Toplamda işlenecek havuz sayısı: ${allPools.length}`);
   return allPools;
 }
 
@@ -342,7 +358,7 @@ async function checkSafetyWithSimulation(tokenAddress) {
   }
 }
 
-// Güvenli Pozisyon Takip Döngüsü (Asla Kırılmaz)
+// Güvenli Pozisyon Takip Döngüsü
 async function monitorPositions() {
   while (botRunning) {
     try {
@@ -411,6 +427,7 @@ async function startSniperWorkerLoop() {
 
           const now = Date.now();
           if (!seenPools[poolAddr]) {
+            console.log(`🆕 [YENİ HAVUZ YAKALANDI] Adres: ${poolAddr} (${pool.dex.toUpperCase()}) - Olgunlaşma süresi başlatıldı (60sn).`);
             seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
             await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
             continue;
@@ -418,19 +435,31 @@ async function startSniperWorkerLoop() {
 
           let poolInfo = seenPools[poolAddr];
           if (poolInfo.status !== 'pending') continue;
-          if (now - poolInfo.firstSeen < POOL_MATURITY_DELAY) continue;
+          
+          const elapsed = now - poolInfo.firstSeen;
+          if (elapsed < POOL_MATURITY_DELAY) {
+            console.log(`⏳ [BEKLEME] Havuz olgunlaşıyor... (${Math.floor((POOL_MATURITY_DELAY - elapsed) / 1000)}s kaldı) -> ${poolAddr}`);
+            continue;
+          }
 
+          console.log(`🛡️ [GÜVENLİK KONTROLÜ] Havuz olgunlaştı, güvenlik taraması yapılıyor: ${tokenAddr}`);
           const safety = await checkSafetyWithSimulation(tokenAddr);
-          if (safety.transient) continue;
+          if (safety.transient) {
+            console.log(`⚠️ [GEÇİCİ HATA] API yanıt vermedi, sonraki turda tekrar denenecek.`);
+            continue;
+          }
 
           if (safety.safe) {
+            console.log(`✅ [GÜVENLİ] Token temiz! Fiyat etkisi (Price Impact) hesaplanıyor...`);
             const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
             if (impact > 5) {
+              console.log(`❌ [İPTAL] Fiyat etkisi çok yüksek (%${impact.toFixed(2)} > %5). Havuz es geçiliyor.`);
               poolInfo.status = 'failed_permanently';
               await saveSeenPoolToDb(poolAddr, poolInfo);
               continue;
             }
 
+            console.log(`🚀 [ALIM BAŞLATILIYOR] ${BUY_AMOUNT} TON değerinde alım emri gönderiliyor...`);
             const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
             if (buyResult.success) {
               poolInfo.status = 'bought';
@@ -448,15 +477,18 @@ async function startSniperWorkerLoop() {
                 await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
               } catch (e) {}
             } else {
+              console.log(`❌ [ALIM BAŞARISIZ] Swap işlemi gerçekleştirilemedi.`);
               poolInfo.status = 'failed_permanently';
               await saveSeenPoolToDb(poolAddr, poolInfo);
             }
           } else {
+            console.log(`🚨 [RUGPULL / TEHLİKE] Token güvenli değil: ${safety.reason}`);
             poolInfo.status = 'failed_permanently';
             await saveSeenPoolToDb(poolAddr, poolInfo);
           }
         }
 
+        console.log(`💤 Tarama döngüsü tamamlandı, ${SCAN_INTERVAL / 1000} saniye sonra tekrar aranacak...\n`);
         await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
       }
 
@@ -487,7 +519,7 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Çift DEX & Çift Tabanlı Sniper Bot Başlatıldı!**\n\n` +
+        `🚀 **Canlı Tarama Loglu Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -534,4 +566,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Çift DEX & Çift Tabanlı TON/GRAM Sniper Bot hazır.");
+console.log("Canlı Tarama Loglu Çift DEX Sniper Bot hazır.");
