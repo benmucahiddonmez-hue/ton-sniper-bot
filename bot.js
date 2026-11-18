@@ -209,10 +209,26 @@ async function fetchNewTonPools(applyFilter = true) {
     console.error("⚠️ STON.fi Tarama Hatası:", error.message);
   }
 
-  // 2. DeDust v2 Taraması
-  try {
-    const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
-    const dedustPoolsList = dedustRes.data || [];
+  // 2. DeDust v2 Taraması (Retry Mekanizmalı)
+  let dedustSuccess = false;
+  let dedustRetries = 3;
+  let dedustPoolsList = [];
+
+  while (!dedustSuccess && dedustRetries > 0) {
+    try {
+      const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
+      dedustPoolsList = dedustRes.data || [];
+      dedustSuccess = true;
+    } catch (error) {
+      dedustRetries--;
+      console.warn(`⚠️ DeDust Tarama Hatası (${error.message}), kalan deneme: ${dedustRetries}`);
+      if (dedustRetries > 0) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  if (dedustSuccess) {
     console.log(`🔍 DeDust API'den toplam ${dedustPoolsList.length} ham havuz çekildi.`);
 
     const dedustPools = dedustPoolsList.map(p => {
@@ -257,8 +273,6 @@ async function fetchNewTonPools(applyFilter = true) {
     console.log(`🔹 DeDust Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${dedustFiltered.length}`);
 
     allPools.push(...dedustFiltered);
-  } catch (error) {
-    console.error("⚠️ DeDust Tarama Hatası:", error.message);
   }
 
   console.log(`📊 Toplam Aktif Havuz (İki DEX Birleştirilmiş): ${allPools.length}`);
@@ -360,7 +374,6 @@ async function startSniperWorkerLoop() {
         }
 
         let pendingCount = 0;
-        let readyToBuyCount = 0;
 
         for (const pool of pools) {
           if (!botRunning) break;
