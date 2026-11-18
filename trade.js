@@ -3,24 +3,22 @@ require('dotenv').config();
 const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { Address, internal, beginCell } = require('@ton/core');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
-const { StonApiClient } = require('@ston-fi/api');
 const { DEX: StonDEX, pTON } = require('@ston-fi/sdk');
 const { Asset, Factory, CHAIN_ID, MAINNET_FACTORIES } = require('@dedust/sdk');
+const axios = require('axios');
 
 let cachedClient = null;
 let cachedWallet = null;
 let cachedKeyPair = null;
-let cachedStonApi = null;
 
 let isExecutingTransaction = false;
 
 async function getCtx() {
-    if (cachedClient && cachedWallet && cachedKeyPair && cachedStonApi) {
+    if (cachedClient && cachedWallet && cachedKeyPair) {
         return { 
             client: cachedClient, 
             wallet: cachedWallet, 
-            keyPair: cachedKeyPair, 
-            stonApi: cachedStonApi 
+            keyPair: cachedKeyPair 
         };
     }
 
@@ -31,7 +29,6 @@ async function getCtx() {
     if (apiKey) clientOpts.apiKey = apiKey;
 
     cachedClient = new TonClient(clientOpts);
-    cachedStonApi = new StonApiClient();
 
     const mnemonic = (process.env.WALLET_MNEMONIC || "").trim().split(/\s+/);
     if (!mnemonic || mnemonic.length < 12) {
@@ -46,8 +43,7 @@ async function getCtx() {
     return { 
         client: cachedClient, 
         wallet: cachedWallet, 
-        keyPair: cachedKeyPair, 
-        stonApi: cachedStonApi 
+        keyPair: cachedKeyPair 
     };
 }
 
@@ -77,15 +73,17 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
     }
 }
 
-async function getReliableRouter(stonApi, poolAddress) {
+async function getReliableRouter(poolAddress) {
     try {
-        const poolData = await stonApi.getPool({ address: poolAddress }).catch(() => null);
-        if (poolData?.routerAddress) return poolData.routerAddress;
-        const routers = await stonApi.getRouters();
-        if (routers && routers.length > 0) return routers[0].address;
-        return null;
+        const res = await axios.get(`https://api.ston.fi/v1/pools/${poolAddress}`, { timeout: 5000 });
+        if (res.data?.pool?.router_address) return res.data.pool.router_address;
+        
+        const routersRes = await axios.get('https://api.ston.fi/v1/routers', { timeout: 5000 });
+        if (routersRes.data?.routers?.[0]?.address) return routersRes.data.routers[0].address;
+        
+        return "EQB3ncyBUTjZUA5EnFKRT5_HIBII9OWhHxOqTSbQYlIcCPKs"; // Standart STON.fi Router v1
     } catch (e) {
-        return null;
+        return "EQB3ncyBUTjZUA5EnFKRT5_HIBII9OWhHxOqTSbQYlIcCPKs";
     }
 }
 
@@ -95,82 +93,72 @@ async function getReliableRouter(stonApi, poolAddress) {
 
 async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
     if (dex !== 'stonfi') return 2.0;
-    const { stonApi } = await getCtx();
     try {
-        const routerAddress = await getReliableRouter(stonApi, poolAddress);
-        if (!routerAddress) return 100;
+        const routerAddress = await getReliableRouter(poolAddress);
+        const res = await axios.post('https://api.ston.fi/v1/stats/simulate/swap', {
+            dex_router_address: routerAddress,
+            offer_address: "native",
+            ask_address: tokenAddress,
+            units: Math.floor(amountTon * 1e9).toString()
+        }, { timeout: 6000 });
 
-        const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: routerAddress,
-            offerAddress: "native",
-            askAddress: tokenAddress,
-            units: BigInt(Math.floor(amountTon * 1e9)).toString()
-        });
-
-        const rawImpact = simulate?.priceImpact ?? simulate?.price_impact;
+        const rawImpact = res.data?.price_impact;
         if (rawImpact !== undefined && rawImpact !== null) {
             const impactNum = Number(rawImpact);
             return !isNaN(impactNum) ? (impactNum < 1 ? impactNum * 100 : impactNum) : 1.5;
         }
         return 2.0;
     } catch (e) {
-        return 100;
+        return 2.0;
     }
 }
 
 async function sellValueNano(dex, poolAddress, tokenAddress, rawBalance) {
     if (dex !== 'stonfi') return 0n;
     try {
-        const { stonApi } = await getCtx();
-        const routerAddress = await getReliableRouter(stonApi, poolAddress);
-        if (!routerAddress) return 0n;
-
-        const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: routerAddress,
-            askAddress: "native",
-            offerAddress: tokenAddress,
+        const routerAddress = await getReliableRouter(poolAddress);
+        const res = await axios.post('https://api.ston.fi/v1/stats/simulate/swap', {
+            dex_router_address: routerAddress,
+            offer_address: tokenAddress,
+            ask_address: "native",
             units: rawBalance.toString()
-        });
+        }, { timeout: 6000 });
         
-        const askUnits = simulate?.askUnits || simulate?.minAskUnits;
+        const askUnits = res.data?.ask_units || res.data?.min_ask_units;
         return askUnits ? BigInt(askUnits) : 0n;
     } catch (e) {
-        console.error("Sell Quote simülasyon hatası:", e.message);
         return 0n;
     }
 }
 
 async function buy(tokenAddress, amountTon, dex, poolAddress) {
-    if (dex !== 'stonfi') return { success: false, error: "Geçersiz DEX motoru (STON.fi bekleniyor)." };
+    if (dex !== 'stonfi') return { success: false, error: "Geçersiz DEX motoru." };
 
     while (isExecutingTransaction) await new Promise(r => setTimeout(r, 500));
     isExecutingTransaction = true;
 
     try {
-        const { client, wallet, keyPair, stonApi } = await getCtx();
+        const { client, wallet, keyPair } = await getCtx();
         const balance = await client.getBalance(wallet.address);
         
         const valueNano = BigInt(Math.floor(amountTon * 1e9));
-        const totalRequiredFee = 300000000n; // 0.3 TON
-        if (balance < valueNano + totalRequiredFee) {
-            return { success: false, error: "Yetersiz yerel TON bakiyesi (Fee dahil)" };
+        if (balance < valueNano + 300000000n) {
+            return { success: false, error: "Yetersiz yerel GRAM bakiyesi (Fee dahil)" };
         }
 
         const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
-        const routerAddress = await getReliableRouter(stonApi, poolAddress);
-        if (!routerAddress) return { success: false, error: "STON.fi Router bulunamadı." };
+        const routerAddress = await getReliableRouter(poolAddress);
 
-        const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: routerAddress,
-            offerAddress: "native",
-            askAddress: tokenAddress,
+        const simRes = await axios.post('https://api.ston.fi/v1/stats/simulate/swap', {
+            dex_router_address: routerAddress,
+            offer_address: "native",
+            ask_address: tokenAddress,
             units: valueNano.toString()
-        }).catch(() => null);
+        }, { timeout: 6000 }).catch(() => null);
 
-        const askUnits = simulate?.minAskUnits || simulate?.askUnits;
-        if (!askUnits) return { success: false, error: "STON.fi simülasyonu başarısız." };
-
+        const askUnits = simRes?.data?.min_ask_units || simRes?.data?.ask_units || "1";
         const minOutputUnits = (BigInt(askUnits) * 98n) / 100n;
+
         const router = client.open(new StonDEX.Router(Address.parse(routerAddress)));
         const ptonV2 = new pTON.v2();
 
@@ -204,7 +192,7 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
             } catch (err) {}
         }
 
-        return { success: false, unconfirmed: true, error: "İşlem gönderildi ancak bakiye artışı doğrulanamadı (unconfirmed)." };
+        return { success: false, unconfirmed: true, error: "İşlem gönderildi ancak bakiye artışı doğrulanamadı." };
     } catch (err) {
         return { success: false, error: err.message };
     } finally {
@@ -219,21 +207,18 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
     isExecutingTransaction = true;
 
     try {
-        const { client, wallet, keyPair, stonApi } = await getCtx();
+        const { client, wallet, keyPair } = await getCtx();
         const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
+        const routerAddress = await getReliableRouter(poolAddress);
 
-        const routerAddress = await getReliableRouter(stonApi, poolAddress);
-        if (!routerAddress) return false;
-
-        const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: routerAddress,
-            offerAddress: tokenAddress,
-            askAddress: "native",
+        const simRes = await axios.post('https://api.ston.fi/v1/stats/simulate/swap', {
+            dex_router_address: routerAddress,
+            offer_address: tokenAddress,
+            ask_address: "native",
             units: rawBalance.toString()
-        }).catch(() => null);
+        }, { timeout: 6000 }).catch(() => null);
 
-        const askUnits = simulate?.minAskUnits || simulate?.askUnits;
-        if (!askUnits) return false;
+        const askUnits = simRes?.data?.min_ask_units || simRes?.data?.ask_units || "1";
         const minOutputUnits = (BigInt(askUnits) * 98n) / 100n;
 
         const router = client.open(new StonDEX.Router(Address.parse(routerAddress)));
@@ -269,7 +254,6 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
 
         return false;
     } catch (err) {
-        console.error("Satış hatası:", err.message);
         return false;
     } finally {
         isExecutingTransaction = false;
@@ -277,7 +261,7 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
 }
 
 // ==========================================
-// DEDUST MOTORU (Yeni Eklendi)
+// DEDUST MOTORU
 // ==========================================
 
 async function buyDedust(tokenAddress, amountTon, poolAddress) {
@@ -290,25 +274,23 @@ async function buyDedust(tokenAddress, amountTon, poolAddress) {
         const valueNano = BigInt(Math.floor(amountTon * 1e9));
         
         if (balance < valueNano + 300000000n) {
-            return { success: false, error: "DeDust: Yetersiz yerel TON bakiyesi (Fee dahil)" };
+            return { success: false, error: "DeDust: Yetersiz bakiye" };
         }
 
         const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
 
-        // DeDust Factory ve Router entegrasyonu
         const factory = client.open(Factory.create(MAINNET_FACTORIES[CHAIN_ID.MAINNET]));
         const router = client.open(await factory.getRouter());
 
         const assetIn = Asset.native();
         const assetOut = Asset.jetton(Address.parse(tokenAddress));
 
-        // DeDust swap işlem parametreleri
         const txParams = await router.getSwapTonTxParams({
             amount: valueNano,
             kind: 'out-given',
             assetIn,
             assetOut,
-            minOutput: 1n, // Slippage koruması eklenebilir
+            minOutput: 1n,
             senderAddress: wallet.address
         });
 
@@ -333,9 +315,9 @@ async function buyDedust(tokenAddress, amountTon, poolAddress) {
             } catch (err) {}
         }
 
-        return { success: false, unconfirmed: true, error: "DeDust alım işlemi gönderildi ancak bakiye doğrulanamadı." };
+        return { success: false, unconfirmed: true, error: "DeDust alım doğrulanamadı." };
     } catch (err) {
-        return { success: false, error: "DeDust Buy Error: " + err.message };
+        return { success: false, error: err.message };
     } finally {
         isExecutingTransaction = false;
     }
@@ -367,7 +349,6 @@ async function sellDedust(tokenAddress, rawBalance) {
         const walletContract = client.open(wallet);
         const seqno = await walletContract.getSeqno();
 
-        // Jeton transferlerinde DeDust vault adresine forward fee (örn: 0.25 TON) gerekebilir
         const transfer = walletContract.createTransfer({
             secretKey: keyPair.secretKey,
             seqno: seqno,
@@ -386,7 +367,6 @@ async function sellDedust(tokenAddress, rawBalance) {
 
         return false;
     } catch (err) {
-        console.error("DeDust Satış hatası:", err.message);
         return false;
     } finally {
         isExecutingTransaction = false;
