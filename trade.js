@@ -1,4 +1,4 @@
-// trade.js - RPC Tabanlı, TonClient Düzeltilmiş Güvenli Modül
+// trade.js - WalletV5 Destekli, Adres Gösteren & RPC Tabanlı Modül
 require('dotenv').config();
 const { TonClient } = require('@ton/ton');
 const { Address, internal } = require('@ton/core');
@@ -39,8 +39,21 @@ async function getCtx() {
     }
 
     cachedKeyPair = await mnemonicToPrivateKey(mnemonic);
-    const { WalletContractV4 } = require('@ton/ton');
-    cachedWallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
+    
+    // Güncel cüzdan standartları (Önce WalletV5 dener, desteklenmiyorsa V4'e düşer)
+    let wallet;
+    try {
+        const { WalletContractV5 } = require('@ton/ton');
+        wallet = WalletContractV5.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
+    } catch (e) {
+        const { WalletContractV4 } = require('@ton/ton');
+        wallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
+    }
+    
+    cachedWallet = wallet;
+
+    // Cüzdan adresini logla ki hangi adrese baktığını net görebilelim
+    console.log(`📍 Aktif Cüzdan Adresi: ${cachedWallet.address.toString({ bounceable: false })}`);
 
     return { 
         client: cachedClient, 
@@ -59,7 +72,7 @@ function normalizeAddress(addr) {
     }
 }
 
-// Tonapi yerine doğrudan RPC (TonClient) üzerinden jeton bakiyesi okuma
+// RPC üzerinden jeton bakiyesi okuma
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
     try {
         const { client } = await getCtx();
@@ -67,7 +80,6 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
         const ownerAddress = Address.isAddress(walletAddress) ? walletAddress : Address.parse(walletAddress.toString());
         const jettonMasterAddress = Address.parse(tokenAddress);
 
-        // TonClient ile jeton cüzdan adresini bul
         const res = await client.runMethod(
             jettonMasterAddress,
             'get_wallet_address',
@@ -76,7 +88,6 @@ async function getWalletJettonBalance(walletAddress, tokenAddress) {
         
         const jettonWalletAddress = res.stack.readAddress();
         
-        // Jeton cüzdanından bakiyeyi çek
         const dataRes = await client.runMethod(
             jettonWalletAddress,
             'get_wallet_data'
