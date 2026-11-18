@@ -35,13 +35,6 @@ let botRunning = false;
 
 let dbClient, positionsCollection, seenPoolsCollection;
 
-const PTON_SET = new Set();
-for (const v of ['v2', 'v2_1', 'v1']) {
-  try { 
-    PTON_SET.add(Address.parse(String(new pTON[v]().address)).toRawString().toLowerCase()); 
-  } catch (e) {}
-}
-
 function normalizeAddress(addr) {
   try {
     if (!addr) return "";
@@ -49,6 +42,17 @@ function normalizeAddress(addr) {
   } catch (e) {
     return String(addr).toLowerCase().trim();
   }
+}
+
+const PTON_SET = new Set([
+  'native',
+  normalizeAddress('EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c') // STON.fi Native TON (0:000...000)
+]);
+
+for (const v of ['v2', 'v2_1', 'v1']) {
+  try { 
+    PTON_SET.add(Address.parse(String(new pTON[v]().address)).toRawString().toLowerCase()); 
+  } catch (e) {}
 }
 
 async function updateTonPrice() {
@@ -170,24 +174,19 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması (Yapı İnceleme Logları Eklendi)
+  // 1. STON.fi Taraması
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
     console.log(`🔍 STON.fi API'den toplam ${poolsList.length} ham havuz çekildi.`);
-    
-    // Ham verinin yapısını görmek için ilk havuzu logluyoruz
-    if (poolsList.length > 0) {
-      console.log("🛠️ STON.fi İlk Havuz Örneği:", JSON.stringify(poolsList[0], null, 2));
-    }
     
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
       const asset0 = normalizeAddress(p.token0_address || p.token0Address);
       const asset1 = normalizeAddress(p.token1_address || p.token1Address);
 
-      const isTon0 = PTON_SET.has(asset0) || asset0 === 'native' || asset0.includes('pton');
-      const isTon1 = PTON_SET.has(asset1) || asset1 === 'native' || asset1.includes('pton');
+      const isTon0 = PTON_SET.has(asset0) || asset0.includes('pton') || asset0.includes('eqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam9c');
+      const isTon1 = PTON_SET.has(asset1) || asset1.includes('pton') || asset1.includes('eqaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam9c');
 
       if (!isTon0 && !isTon1) return null;
 
