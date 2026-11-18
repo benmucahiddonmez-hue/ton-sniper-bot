@@ -12,7 +12,7 @@ let cachedCtx = null;
 async function getCtx() {
   if (cachedCtx) return cachedCtx;
   const endpoint = process.env.TON_RPC_ENDPOINT || 'https://toncenter.com/api/v2/jsonRPC';
-  const apiKey = process.env.TONAPI_KEY; 
+  const apiKey = process.env.TONCENTER_API_KEY; // <-- DÜZELTİLDİ: Toncenter anahtarı doğru parametreye oturtuldu
   const client = new TonClient({ endpoint, apiKey });
   
   const mnemonicStr = process.env.WALLET_MNEMONIC || "";
@@ -175,15 +175,13 @@ async function getWalletJettonBalance(walletAddress, jettonMasterAddress) {
     const { client } = await getCtx();
     const jettonMaster = client.open(JettonRoot.createFromAddress(Address.parse(jettonMasterAddress)));
     const jettonWalletAddr = await jettonMaster.getWallet(walletAddress);
-    const jettonWallet = client.open(await client.openWallet(jettonWalletAddr)); // Veya standart TonClient contract open
+    const jettonWallet = client.open(await client.openWallet(jettonWalletAddr));
     const data = await jettonWallet.getBalance();
     return data;
   } catch (e) {
-    // Alternatif sadeleştirilmiş bakiye kontrolü
     try {
       const { client } = await getCtx();
       const res = await client.runMethod(Address.parse(walletAddress), "get_wallet_data", []);
-      // Fallback olarak tonapi veya client tabanlı kontrol
       return 0n;
     } catch (ex) {
       return 0n;
