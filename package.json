@@ -10,7 +10,7 @@
     "@dedust/sdk": "^0.3.3",
     "@ston-fi/api": "^0.1.0",
     "@ston-fi/sdk": "^0.3.0",
-    "@ton/core": "^0.56.3",
+    "@ton/core": "^0.62.0",
     "@ton/crypto": "^3.2.0",
     "@ton/ton": "^15.0.0",
     "axios": "^1.6.0",
