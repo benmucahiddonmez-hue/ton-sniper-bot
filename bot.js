@@ -23,7 +23,7 @@ let lastPriceUpdate = 0;
 
 const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
-const POOL_MATURITY_DELAY = 60000;
+const POOL_MATURITY_DELAY = 10000;
 const BUY_AMOUNT = 0.5;
 
 const TAKE_PROFIT_PERCENT = 35.0;
