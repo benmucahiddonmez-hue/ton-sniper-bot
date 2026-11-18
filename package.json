@@ -7,7 +7,7 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "@dedust/sdk": "^0.0.14",
+    "@dedust/sdk": "^0.8.7",
     "@ston-fi/sdk": "^2.2.1",
     "@ton/core": "^0.62.0",
     "@ton/crypto": "^3.3.0",
