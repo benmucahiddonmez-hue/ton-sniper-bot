@@ -1,6 +1,6 @@
-// trade.js - Tamamen Güvenceye Alınmış, Saf STON.fi v2 SDK & API Modülü
+// trade.js - RPC Tabanlı, Tonapi Bağımlılığı Olmayan Güvenli Modül
 require('dotenv').config();
-const { TonClient, WalletContractV4, internal, Address } = require('@ton/ton');
+const { TonClient, WalletContractV4, internal, Address } = require('@ton/core');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { StonApiClient } = require('@ston-fi/api');
 const { DEX: StonDEX, pTON } = require('@ston-fi/sdk');
@@ -57,19 +57,34 @@ function normalizeAddress(addr) {
     }
 }
 
+// Tonapi yerine doğrudan RPC (TonClient) üzerinden jeton bakiyesi okuma
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
     try {
-        const tonapiKey = process.env.TONAPI_KEY;
-        const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
-        const res = await axios.get(`https://tonapi.io/v2/accounts/${walletAddress.toString()}/jettons`, { headers, timeout: 5000 });
-        const balances = res.data?.balances || [];
+        const { client } = await getCtx();
         
-        const targetRaw = normalizeAddress(tokenAddress);
-        const found = balances.find(j => normalizeAddress(j.jetton?.address) === targetRaw);
-        return found ? BigInt(found.balance) : 0n;
+        const ownerAddress = Address.isAddress(walletAddress) ? walletAddress : Address.parse(walletAddress.toString());
+        const jettonMasterAddress = Address.parse(tokenAddress);
+
+        // TonClient ile jeton cüzdan adresini bul
+        const res = await client.runMethod(
+            jettonMasterAddress,
+            'get_wallet_address',
+            [{ type: 'slice', cell: (await import('@ton/core')).beginCell().storeAddress(ownerAddress).endCell() }]
+        );
+        
+        const jettonWalletAddress = res.stack.readAddress();
+        
+        // Jeton cüzdanından bakiyeyi çek
+        const dataRes = await client.runMethod(
+            jettonWalletAddress,
+            'get_wallet_data'
+        );
+        
+        const balance = dataRes.stack.readBigNumber();
+        return balance;
     } catch (err) {
-        console.error("TonAPI Jetton bakiye okuma hatası:", err.message);
-        throw new Error("Bakiye doğrulanamadı: TonAPI erişim hatası.");
+        console.error("RPC Jetton bakiye okuma hatası:", err.message);
+        return 0n;
     }
 }
 
@@ -89,7 +104,6 @@ async function getReliableRouter(stonApi, poolAddress) {
     }
 }
 
-// Güvenli Price Impact Hesabı (Sadece API simülasyonu veya BigInt rezerv oranı)
 async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
     if (dex !== 'stonfi') return 2.0;
     const { stonApi } = await getCtx();
@@ -107,7 +121,6 @@ async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
             return !isNaN(impactNum) ? (impactNum < 1 ? impactNum * 100 : impactNum) : 1.5;
         }
 
-        // Fallback: Hassasiyet kaybı yaşamamak için BigInt tabanlı rezerv oranı
         const poolData = await stonApi.getPool({ address: poolAddress }).catch(() => null);
         if (poolData) {
             const isToken0 = normalizeAddress(poolData.token0Address) === normalizeAddress(tokenAddress);
@@ -125,7 +138,6 @@ async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
     }
 }
 
-// Kesinlikle yanlış tahmin üretmeyen, yalnızca gerçek API/SDK simülasyon çıktısına dayanan sellValueNano
 async function sellValueNano(dex, poolAddress, tokenAddress, rawBalance) {
     if (dex !== 'stonfi') return 0n;
     try {
@@ -145,7 +157,6 @@ async function sellValueNano(dex, poolAddress, tokenAddress, rawBalance) {
     }
 }
 
-// Alım (Buy) Fonksiyonu (Yalnızca STON.fi v2 Resmi SDK)
 async function buy(tokenAddress, amountTon, dex, poolAddress) {
     if (dex !== 'stonfi') {
         return { success: false, error: "Bot şu an yalnızca STON.fi v2 desteklemektedir." };
@@ -181,7 +192,7 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
         const askUnits = simulate?.minAskUnits || simulate?.askUnits;
         if (!askUnits) return { success: false, error: "STON.fi simülasyonu başarısız." };
 
-        const minOutputUnits = (BigInt(askUnits) * 98n) / 100n; // %2 slippage
+        const minOutputUnits = (BigInt(askUnits) * 98n) / 100n;
 
         const router = client.open(new StonDEX.Router(Address.parse(routerAddress)));
         const ptonV2 = new pTON.v2();
@@ -206,7 +217,6 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
 
         await client.sendExternalMessage(wallet, transfer);
 
-        // Bakiye ve Indexing Doğrulama Döngüsü
         for (let i = 0; i < 6; i++) {
             await new Promise(r => setTimeout(r, 4000));
             try {
@@ -229,7 +239,6 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
     }
 }
 
-// Satış (Sell) Fonksiyonu (Yalnızca STON.fi v2 Resmi SDK)
 async function sell(tokenAddress, dex, poolAddress, rawBalance) {
     if (dex !== 'stonfi') return false;
 
@@ -241,13 +250,6 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
     try {
         const { client, wallet, keyPair, stonApi } = await getCtx();
         const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
-
-        const tonapiKey = process.env.TONAPI_KEY;
-        const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
-        const res = await axios.get(`https://tonapi.io/v2/accounts/${wallet.address.toString()}/jettons`, { headers, timeout: 5000 });
-        const found = (res.data?.balances || []).find(j => normalizeAddress(j.jetton.address) === normalizeAddress(tokenAddress));
-        
-        if (!found || !found.wallet_address?.address) return false;
 
         const routerAddress = await getReliableRouter(stonApi, poolAddress);
         if (!routerAddress) return false;
