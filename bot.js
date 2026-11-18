@@ -1,4 +1,4 @@
-// bot.js - DeDust Debug ve Şeffaf Log Destekli Sniper Bot
+// bot.js - DeDust Debug, Şeffaf Log ve Cüzdan Adresi Destekli Tam Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -251,8 +251,6 @@ async function fetchNewTonPools(applyFilter = true) {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
 
-    console.log("DeDust örnek:", JSON.stringify(dedustPoolsList[0]), "| toplam:", dedustPoolsList.length);
-
     const dedustPools = dedustPoolsList.map(p => {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
@@ -301,7 +299,6 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
 
-    console.log(`📡 [DeDust] API tarandı | Filtrelenen uygun havuz: ${dedustPools.length}`);
     allPools.push(...dedustPools);
   } catch (error) {
     console.error("⚠️ DeDust Tarama Hatası:", error.message);
@@ -453,7 +450,6 @@ async function startSniperWorkerLoop() {
           }
         }
 
-        console.log(`💤 Tarama döngüsü tamamlandı, ${SCAN_INTERVAL / 1000} saniye sonra tekrar aranacak...\n`);
         await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
       }
     } catch (criticalErr) {
@@ -473,6 +469,7 @@ bot.onText(/\/baslat/, async (msg) => {
     await initDatabase();
 
     const { wallet } = await getCtx();
+    const addressStr = wallet.address.toString({ bounceable: false });
     const stats = await getWalletAndGramStats(wallet.address);
 
     const wasRunning = botRunning;
@@ -483,6 +480,7 @@ bot.onText(/\/baslat/, async (msg) => {
         msg.chat.id, 
         `🚀 **Debug Destekli Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
+        `📍 **Cüzdan:** \`${addressStr}\`\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
         `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
@@ -510,11 +508,13 @@ bot.onText(/\/bakiye/, async (msg) => {
   if (msg.from.id !== ALLOWED_USER_ID) return;
   try {
     const { wallet } = await getCtx();
+    const addressStr = wallet.address.toString({ bounceable: false });
     const stats = await getWalletAndGramStats(wallet.address);
 
     bot.sendMessage(
       msg.chat.id, 
       `💰 **Cüzdan Durumu:**\n\n` +
+      `📍 **Cüzdan:** \`${addressStr}\`\n` +
       `🔹 **TON:** \`${stats.balanceTon.toFixed(4)}\`\n` +
       `🔹 **Gram:** \`${stats.gramBalance.toFixed(4)}\`\n` +
       `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
