@@ -1,11 +1,11 @@
-// trade.js - Kesin V4 Cüzdan Adresi Sabitli Modül
+// trade.js - STON.fi ve DeDust Çift Motorlu Takas Modülü
 require('dotenv').config();
 const { TonClient, WalletContractV4 } = require('@ton/ton');
-const { Address, internal } = require('@ton/core');
+const { Address, internal, beginCell } = require('@ton/core');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { StonApiClient } = require('@ston-fi/api');
 const { DEX: StonDEX, pTON } = require('@ston-fi/sdk');
-const axios = require('axios');
+const { Asset, Factory, CHAIN_ID, MAINNET_FACTORIES } = require('@dedust/sdk');
 
 let cachedClient = null;
 let cachedWallet = null;
@@ -39,11 +39,8 @@ async function getCtx() {
     }
 
     cachedKeyPair = await mnemonicToPrivateKey(mnemonic);
-    
-    // Doğrudan WalletContractV4 kullanarak cüzdanı kelimelerinden türetiyoruz (Tonkeeper ile birebir uyumlu)
     cachedWallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
 
-    // Cüzdan adresini logla ki telefonundaki cüzdanla aynı olup olmadığını hemen görebil
     console.log(`📍 Doğrulanmış Aktif Cüzdan Adresi: ${cachedWallet.address.toString({ bounceable: false })}`);
 
     return { 
@@ -63,57 +60,48 @@ function normalizeAddress(addr) {
     }
 }
 
-// RPC üzerinden jeton bakiyesi okuma
 async function getWalletJettonBalance(walletAddress, tokenAddress) {
+    const { client } = await getCtx();
+    const owner = Address.isAddress(walletAddress) ? walletAddress : Address.parse(walletAddress.toString());
+    const master = Address.parse(tokenAddress);
+    const res = await client.runMethod(master, 'get_wallet_address', [
+        { type: 'slice', cell: beginCell().storeAddress(owner).endCell() }
+    ]);
+    const jettonWallet = res.stack.readAddress();
     try {
-        const { client } = await getCtx();
-        
-        const ownerAddress = Address.isAddress(walletAddress) ? walletAddress : Address.parse(walletAddress.toString());
-        const jettonMasterAddress = Address.parse(tokenAddress);
-
-        const res = await client.runMethod(
-            jettonMasterAddress,
-            'get_wallet_address',
-            [{ type: 'slice', cell: (await import('@ton/core')).beginCell().storeAddress(ownerAddress).endCell() }]
-        );
-        
-        const jettonWalletAddress = res.stack.readAddress();
-        
-        const dataRes = await client.runMethod(
-            jettonWalletAddress,
-            'get_wallet_data'
-        );
-        
-        const balance = dataRes.stack.readBigNumber();
-        return balance;
-    } catch (err) {
-        console.error("RPC Jetton bakiye okuma hatası:", err.message);
-        return 0n;
+        const d = await client.runMethod(jettonWallet, 'get_wallet_data');
+        return d.stack.readBigNumber();
+    } catch (e) {
+        if (String(e.message).includes('-13')) return 0n;
+        throw e;
     }
 }
 
 async function getReliableRouter(stonApi, poolAddress) {
     try {
         const poolData = await stonApi.getPool({ address: poolAddress }).catch(() => null);
-        if (poolData?.routerAddress) {
-            return poolData.routerAddress;
-        }
+        if (poolData?.routerAddress) return poolData.routerAddress;
         const routers = await stonApi.getRouters();
-        if (routers && routers.length > 0) {
-            return routers[0].address;
-        }
+        if (routers && routers.length > 0) return routers[0].address;
         return null;
     } catch (e) {
         return null;
     }
 }
 
+// ==========================================
+// STON.FI MOTORU
+// ==========================================
+
 async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
     if (dex !== 'stonfi') return 2.0;
     const { stonApi } = await getCtx();
     try {
+        const routerAddress = await getReliableRouter(stonApi, poolAddress);
+        if (!routerAddress) return 100;
+
         const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: poolAddress,
+            dexRouterAddress: routerAddress,
             offerAddress: "native",
             askAddress: tokenAddress,
             units: BigInt(Math.floor(amountTon * 1e9)).toString()
@@ -124,21 +112,9 @@ async function buyImpactPct(dex, poolAddress, tokenAddress, amountTon) {
             const impactNum = Number(rawImpact);
             return !isNaN(impactNum) ? (impactNum < 1 ? impactNum * 100 : impactNum) : 1.5;
         }
-
-        const poolData = await stonApi.getPool({ address: poolAddress }).catch(() => null);
-        if (poolData) {
-            const isToken0 = normalizeAddress(poolData.token0Address) === normalizeAddress(tokenAddress);
-            const tokenRes = BigInt(isToken0 ? (poolData.reserve0 || "1") : (poolData.reserve1 || "1"));
-            const tonRes = BigInt(isToken0 ? (poolData.reserve1 || "1") : (poolData.reserve0 || "1"));
-
-            if (tonRes > 0n) {
-                const ratioNum = Number((BigInt(Math.floor(amountTon * 1e9)) * 100n) / tonRes);
-                return Math.min(Math.max(ratioNum, 0.5), 5.0);
-            }
-        }
         return 2.0;
     } catch (e) {
-        return 2.5;
+        return 100;
     }
 }
 
@@ -146,14 +122,17 @@ async function sellValueNano(dex, poolAddress, tokenAddress, rawBalance) {
     if (dex !== 'stonfi') return 0n;
     try {
         const { stonApi } = await getCtx();
+        const routerAddress = await getReliableRouter(stonApi, poolAddress);
+        if (!routerAddress) return 0n;
+
         const simulate = await stonApi.simulateSwap({
-            dexRouterAddress: poolAddress,
+            dexRouterAddress: routerAddress,
             askAddress: "native",
             offerAddress: tokenAddress,
             units: rawBalance.toString()
         });
         
-        const askUnits = simulate?.minAskUnits || simulate?.askUnits;
+        const askUnits = simulate?.askUnits || simulate?.minAskUnits;
         return askUnits ? BigInt(askUnits) : 0n;
     } catch (e) {
         console.error("Sell Quote simülasyon hatası:", e.message);
@@ -162,13 +141,9 @@ async function sellValueNano(dex, poolAddress, tokenAddress, rawBalance) {
 }
 
 async function buy(tokenAddress, amountTon, dex, poolAddress) {
-    if (dex !== 'stonfi') {
-        return { success: false, error: "Bot şu an yalnızca STON.fi v2 desteklemektedir." };
-    }
+    if (dex !== 'stonfi') return { success: false, error: "Geçersiz DEX motoru (STON.fi bekleniyor)." };
 
-    while (isExecutingTransaction) {
-        await new Promise(r => setTimeout(r, 500));
-    }
+    while (isExecutingTransaction) await new Promise(r => setTimeout(r, 500));
     isExecutingTransaction = true;
 
     try {
@@ -182,7 +157,6 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
         }
 
         const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
-
         const routerAddress = await getReliableRouter(stonApi, poolAddress);
         if (!routerAddress) return { success: false, error: "STON.fi Router bulunamadı." };
 
@@ -197,7 +171,6 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
         if (!askUnits) return { success: false, error: "STON.fi simülasyonu başarısız." };
 
         const minOutputUnits = (BigInt(askUnits) * 98n) / 100n;
-
         const router = client.open(new StonDEX.Router(Address.parse(routerAddress)));
         const ptonV2 = new pTON.v2();
 
@@ -226,16 +199,12 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
             try {
                 const afterBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
                 if (afterBalance > beforeBalance) {
-                    return { 
-                        success: true, 
-                        costTon: amountTon, 
-                        rawBalance: afterBalance - beforeBalance 
-                    };
+                    return { success: true, costTon: amountTon, rawBalance: afterBalance - beforeBalance };
                 }
             } catch (err) {}
         }
 
-        return { success: false, unconfirmed: true, error: "İşlem gönderildi ancak bakiye artışı doğrulanamadı." };
+        return { success: false, unconfirmed: true, error: "İşlem gönderildi ancak bakiye artışı doğrulanamadı (unconfirmed)." };
     } catch (err) {
         return { success: false, error: err.message };
     } finally {
@@ -246,9 +215,7 @@ async function buy(tokenAddress, amountTon, dex, poolAddress) {
 async function sell(tokenAddress, dex, poolAddress, rawBalance) {
     if (dex !== 'stonfi') return false;
 
-    while (isExecutingTransaction) {
-        await new Promise(r => setTimeout(r, 500));
-    }
+    while (isExecutingTransaction) await new Promise(r => setTimeout(r, 500));
     isExecutingTransaction = true;
 
     try {
@@ -296,9 +263,7 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
             await new Promise(r => setTimeout(r, 4000));
             try {
                 const afterBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
-                if (afterBalance < beforeBalance) {
-                    return true;
-                }
+                if (afterBalance < beforeBalance) return true;
             } catch (err) {}
         }
 
@@ -311,11 +276,130 @@ async function sell(tokenAddress, dex, poolAddress, rawBalance) {
     }
 }
 
+// ==========================================
+// DEDUST MOTORU (Yeni Eklendi)
+// ==========================================
+
+async function buyDedust(tokenAddress, amountTon, poolAddress) {
+    while (isExecutingTransaction) await new Promise(r => setTimeout(r, 500));
+    isExecutingTransaction = true;
+
+    try {
+        const { client, wallet, keyPair } = await getCtx();
+        const balance = await client.getBalance(wallet.address);
+        const valueNano = BigInt(Math.floor(amountTon * 1e9));
+        
+        if (balance < valueNano + 300000000n) {
+            return { success: false, error: "DeDust: Yetersiz yerel TON bakiyesi (Fee dahil)" };
+        }
+
+        const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
+
+        // DeDust Factory ve Router entegrasyonu
+        const factory = client.open(Factory.create(MAINNET_FACTORIES[CHAIN_ID.MAINNET]));
+        const router = client.open(await factory.getRouter());
+
+        const assetIn = Asset.native();
+        const assetOut = Asset.jetton(Address.parse(tokenAddress));
+
+        // DeDust swap işlem parametreleri
+        const txParams = await router.getSwapTonTxParams({
+            amount: valueNano,
+            kind: 'out-given',
+            assetIn,
+            assetOut,
+            minOutput: 1n, // Slippage koruması eklenebilir
+            senderAddress: wallet.address
+        });
+
+        const walletContract = client.open(wallet);
+        const seqno = await walletContract.getSeqno();
+
+        const transfer = walletContract.createTransfer({
+            secretKey: keyPair.secretKey,
+            seqno: seqno,
+            messages: [internal({ to: txParams.to, value: txParams.value, bounce: true, body: txParams.body })]
+        });
+
+        await client.sendExternalMessage(wallet, transfer);
+
+        for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 4000));
+            try {
+                const afterBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
+                if (afterBalance > beforeBalance) {
+                    return { success: true, costTon: amountTon, rawBalance: afterBalance - beforeBalance };
+                }
+            } catch (err) {}
+        }
+
+        return { success: false, unconfirmed: true, error: "DeDust alım işlemi gönderildi ancak bakiye doğrulanamadı." };
+    } catch (err) {
+        return { success: false, error: "DeDust Buy Error: " + err.message };
+    } finally {
+        isExecutingTransaction = false;
+    }
+}
+
+async function sellDedust(tokenAddress, rawBalance) {
+    while (isExecutingTransaction) await new Promise(r => setTimeout(r, 500));
+    isExecutingTransaction = true;
+
+    try {
+        const { client, wallet, keyPair } = await getCtx();
+        const beforeBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
+
+        const factory = client.open(Factory.create(MAINNET_FACTORIES[CHAIN_ID.MAINNET]));
+        const router = client.open(await factory.getRouter());
+
+        const assetIn = Asset.jetton(Address.parse(tokenAddress));
+        const assetOut = Asset.native();
+
+        const txParams = await router.getSwapJettonTxParams({
+            amount: BigInt(rawBalance),
+            kind: 'out-given',
+            assetIn,
+            assetOut,
+            minOutput: 1n,
+            senderAddress: wallet.address
+        });
+
+        const walletContract = client.open(wallet);
+        const seqno = await walletContract.getSeqno();
+
+        // Jeton transferlerinde DeDust vault adresine forward fee (örn: 0.25 TON) gerekebilir
+        const transfer = walletContract.createTransfer({
+            secretKey: keyPair.secretKey,
+            seqno: seqno,
+            messages: [internal({ to: txParams.to, value: 300000000n, bounce: true, body: txParams.body })]
+        });
+
+        await client.sendExternalMessage(wallet, transfer);
+
+        for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 4000));
+            try {
+                const afterBalance = await getWalletJettonBalance(wallet.address, tokenAddress);
+                if (afterBalance < beforeBalance) return true;
+            } catch (err) {}
+        }
+
+        return false;
+    } catch (err) {
+        console.error("DeDust Satış hatası:", err.message);
+        return false;
+    } finally {
+        isExecutingTransaction = false;
+    }
+}
+
 module.exports = {
     getCtx,
     getWalletJettonBalance,
     buy,
     sell,
     sellValueNano,
-    buyImpactPct
+    buyImpactPct,
+    buyDedust,
+    sellDedust
 };
