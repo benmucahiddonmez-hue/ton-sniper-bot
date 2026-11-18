@@ -170,7 +170,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması
+  // 1. STON.fi Taraması (Güncellenmiş Esnek Filtre)
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
@@ -181,27 +181,27 @@ async function fetchNewTonPools(applyFilter = true) {
       const asset0 = normalizeAddress(p.token0_address || p.token0Address);
       const asset1 = normalizeAddress(p.token1_address || p.token1Address);
 
-      const isNative0 = PTON_SET.has(asset0) || asset0 === 'native' || asset0.includes('pton') || asset0.includes('eqb3ncybutj');
-      const isNative1 = PTON_SET.has(asset1) || asset1 === 'native' || asset1.includes('pton') || asset1.includes('eqb3ncybutj');
-      
-      if (!isNative0 && !isNative1) return null;
+      const isTon0 = PTON_SET.has(asset0) || asset0 === 'native' || asset0.includes('pton');
+      const isTon1 = PTON_SET.has(asset1) || asset1 === 'native' || asset1.includes('pton');
 
-      let rTonLike = isNative0 ? Number(p.reserve0 || p.r0 || 0) / 1e9 : Number(p.reserve1 || p.r1 || 0) / 1e9;
+      if (!isTon0 && !isTon1) return null;
+
+      let rTonLike = isTon0 ? Number(p.reserve0 || p.r0 || 0) / 1e9 : Number(p.reserve1 || p.r1 || 0) / 1e9;
       if (rTonLike <= 0) return null;
 
-      const baseTokenAddress = isNative0 ? asset1 : asset0;
+      const baseTokenAddress = isTon0 ? asset1 : asset0;
       if (!baseTokenAddress) return null;
 
       return {
         address: p.address,
         dex: 'stonfi',
-        name: `TOKEN/GRAM (STON.fi)`,
+        name: `TOKEN/TON (STON.fi)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: baseTokenAddress
       };
     }).filter(p => p !== null);
 
-    console.log(`🔹 STON.fi GRAM eşleşmeli havuz: ${stonPools.length}`);
+    console.log(`🔹 STON.fi TON eşleşmeli havuz: ${stonPools.length}`);
     const stonFiltered = stonPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
     console.log(`🔹 STON.fi Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${stonFiltered.length}`);
     
@@ -263,13 +263,13 @@ async function fetchNewTonPools(applyFilter = true) {
       return {
         address: p.address || p.id,
         dex: 'dedust',
-        name: `TOKEN/GRAM (DeDust)`,
+        name: `TOKEN/TON (DeDust)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: normalizeAddress(tokenAsset.address)
       };
     }).filter(p => p !== null);
 
-    console.log(`🔹 DeDust GRAM eşleşmeli havuz: ${dedustPools.length}`);
+    console.log(`🔹 DeDust TON eşleşmeli havuz: ${dedustPools.length}`);
     const dedustFiltered = dedustPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
     console.log(`🔹 DeDust Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${dedustFiltered.length}`);
 
@@ -434,7 +434,7 @@ async function startSniperWorkerLoop() {
 
                 console.log(`✅ ALIM BAŞARILI (${pool.dex.toUpperCase()}): ${tokenAddr}`);
                 try {
-                  await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} GRAM - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
+                  await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
                 } catch (e) {}
               } else {
                 console.error(`❌ Alım başarısız (${pool.dex.toUpperCase()} - ${tokenAddr}):`, buyResult.error);
@@ -485,7 +485,7 @@ bot.onText(/\/baslat/, async (msg) => {
         `🚀 **Çift DEX Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** STON.fi & DeDust Aktif\n` +
         `📍 **Cüzdan:** \`${addressStr}\`\n` +
-        `💰 **GRAM:** \`${stats.balanceGram.toFixed(2)}\`\n` +
+        `💰 **TON:** \`${stats.balanceGram.toFixed(2)}\`\n` +
         `📈 **Fiyat:** \`$${stats.priceUsd.toFixed(4)}\``, 
         { parse_mode: "Markdown" }
       );
@@ -519,7 +519,7 @@ bot.onText(/\/bakiye/, async (msg) => {
       msg.chat.id, 
       `💰 **Cüzdan Durumu:**\n\n` +
       `📍 **Cüzdan:** \`${addressStr}\`\n` +
-      `🔹 **GRAM:** \`${stats.balanceGram.toFixed(4)}\`\n` +
+      `🔹 **TON:** \`${stats.balanceGram.toFixed(4)}\`\n` +
       `🔹 **Fiyat:** \`$${stats.priceUsd.toFixed(4)}\``, 
       { parse_mode: "Markdown" }
     );
