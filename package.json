@@ -4,7 +4,7 @@
   "description": "TON Multi-DEX Sniper Bot (STON.fi & DeDust)",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "npm install --legacy-peer-deps && node bot.js"
   },
   "dependencies": {
     "@dedust/sdk": "^0.8.7",
