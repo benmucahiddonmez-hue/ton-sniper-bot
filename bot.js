@@ -5,7 +5,7 @@ const { MongoClient } = require('mongodb');
 const axios = require('axios');
 const { Address } = require('@ton/core');
 const { pTON } = require('@ston-fi/sdk');
-const { buy, sell, sellValueNano, buyImpactPct, getWalletJettonBalance, getCtx, buyDedust, sellDedust, dedustSellValueNano } = require('./trade.js');
+const { buy, sell, sellValueNano, buyImpactPct, getWalletJettonBalance, getCtx, buyDedust, sellDedust } = require('./trade.js');
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
@@ -23,7 +23,7 @@ let lastPriceUpdate = 0;
 
 const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
-const POOL_MATURITY_DELAY = 10000; // Test için 10 saniye
+const POOL_MATURITY_DELAY = 10000; // Test için 10 saniyeye düşürüldü
 const BUY_AMOUNT = 0.5;
 
 const TAKE_PROFIT_PERCENT = 35.0;
@@ -46,7 +46,7 @@ function normalizeAddress(addr) {
 
 const PTON_SET = new Set([
   'native',
-  normalizeAddress('EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c') // STON.fi Native TON
+  normalizeAddress('EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c') // STON.fi Native TON (0:000...000)
 ]);
 
 for (const v of ['v2', 'v2_1', 'v1']) {
@@ -178,6 +178,7 @@ async function fetchNewTonPools(applyFilter = true) {
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
+    console.log(`🔍 STON.fi API'den toplam ${poolsList.length} ham havuz çekildi.`);
     
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
@@ -204,7 +205,10 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null);
 
+    console.log(`🔹 STON.fi TON eşleşmeli havuz: ${stonPools.length}`);
     const stonFiltered = stonPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
+    console.log(`🔹 STON.fi Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${stonFiltered.length}`);
+    
     allPools.push(...stonFiltered);
   } catch (error) {
     console.error("⚠️ STON.fi Tarama Hatası:", error.message);
@@ -222,6 +226,7 @@ async function fetchNewTonPools(applyFilter = true) {
       dedustSuccess = true;
     } catch (error) {
       dedustRetries--;
+      console.warn(`⚠️ DeDust Tarama Hatası (${error.message}), kalan deneme: ${dedustRetries}`);
       if (dedustRetries > 0) {
         await new Promise(r => setTimeout(r, 2000));
       }
@@ -229,6 +234,8 @@ async function fetchNewTonPools(applyFilter = true) {
   }
 
   if (dedustSuccess) {
+    console.log(`🔍 DeDust API'den toplam ${dedustPoolsList.length} ham havuz çekildi.`);
+
     const dedustPools = dedustPoolsList.map(p => {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
@@ -266,10 +273,14 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null);
 
+    console.log(`🔹 DeDust TON eşleşmeli havuz: ${dedustPools.length}`);
     const dedustFiltered = dedustPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
+    console.log(`🔹 DeDust Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${dedustFiltered.length}`);
+
     allPools.push(...dedustFiltered);
   }
 
+  console.log(`📊 Toplam Aktif Havuz (İki DEX Birleştirilmiş): ${allPools.length}`);
   return allPools;
 }
 
@@ -301,7 +312,7 @@ async function monitorPositions() {
         if (pos.dex === 'stonfi') {
           currentValNano = await sellValueNano(pos.dex, pos.poolAddr, tokenAddr, pos.rawBalance);
         } else {
-          currentValNano = await dedustSellValueNano(pos.poolAddr, tokenAddr, pos.rawBalance);
+          currentValNano = BigInt(Math.floor(pos.amount * 1e9 * 1.1));
         }
 
         if (currentValNano <= 0n) continue;
@@ -317,7 +328,7 @@ async function monitorPositions() {
           if (pos.dex === 'stonfi') {
             sold = await sell(tokenAddr, pos.dex, pos.poolAddr, pos.rawBalance);
           } else {
-            sold = await sellDedust(tokenAddr, pos.rawBalance, pos.poolAddr);
+            sold = await sellDedust(tokenAddr, pos.rawBalance);
           }
           
           if (sold) {
@@ -383,7 +394,7 @@ async function startSniperWorkerLoop() {
           if (!seenPools[poolAddr]) {
             seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
             await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
-            console.log(`🆕 YENİ HAVUZ YAKALANDI (${pool.dex.toUpperCase()})`);
+            console.log(`🆕 YENİ HAVUZ YAKALANDI (${pool.dex.toUpperCase()}): ${poolAddr.substring(0, 10)}... Olgunlaşma süresi başlatıldı.`);
             continue;
           }
 
@@ -392,15 +403,18 @@ async function startSniperWorkerLoop() {
             pendingCount++;
             if ((now - poolInfo.firstSeen) < POOL_MATURITY_DELAY) continue;
 
+            console.log(`⏳ Havuz olgunlaştı, güvenlik testi yapılıyor: ${tokenAddr.substring(0, 10)}...`);
             const safety = await checkSafetyWithSimulation(tokenAddr);
             if (safety.transient) continue;
 
             if (safety.safe) {
+              console.log(`🛡️ Güvenlik testi BAŞARILI: ${tokenAddr.substring(0, 10)}... Alım tetikleniyor.`);
               let buyResult = { success: false, error: "Bilinmeyen hata" };
 
               if (pool.dex === 'stonfi') {
                 const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
                 if (impact > 5) {
+                  console.log(`⚠️ Fiyat Etkisi çok yüksek (%${impact.toFixed(2)}), alım iptal.`);
                   poolInfo.status = 'failed_permanently';
                   await saveSeenPoolToDb(poolAddr, poolInfo);
                   continue;
@@ -429,13 +443,14 @@ async function startSniperWorkerLoop() {
               } else {
                 console.error(`❌ Alım başarısız (${pool.dex.toUpperCase()} - ${tokenAddr}):`, buyResult.error);
                 if (buyResult.unconfirmed) {
-                  poolInfo.status = 'unconfirmed'; // Çift alım koruması
+                  poolInfo.status = 'pending';
                 } else {
                   poolInfo.status = 'failed_permanently';
                 }
                 await saveSeenPoolToDb(poolAddr, poolInfo);
               }
             } else {
+              console.log(`🚫 Güvenlik testi BAŞARISIZ (${safety.reason}): ${tokenAddr.substring(0, 10)}...`);
               poolInfo.status = 'failed_permanently';
               await saveSeenPoolToDb(poolAddr, poolInfo);
             }
