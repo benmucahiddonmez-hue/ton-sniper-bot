@@ -23,7 +23,7 @@ let lastPriceUpdate = 0;
 
 const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
-const POOL_MATURITY_DELAY = 10000;
+const POOL_MATURITY_DELAY = 10000; // Test için 10 saniyeye düşürüldü
 const BUY_AMOUNT = 0.5;
 
 const TAKE_PROFIT_PERCENT = 35.0;
@@ -170,7 +170,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması (Esnek Eşleşme)
+  // 1. STON.fi Taraması
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
@@ -390,7 +390,7 @@ async function startSniperWorkerLoop() {
           if (!seenPools[poolAddr]) {
             seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
             await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
-            console.log(`🆕 Yeni Havuz Yakalandı (${pool.dex.toUpperCase()}): ${poolAddr.substring(0, 10)}... (Olgunlaşma süresi başlatıldı)`);
+            console.log(`🆕 YENİ HAVUZ YAKALANDI (${pool.dex.toUpperCase()}): ${poolAddr.substring(0, 10)}... Olgunlaşma süresi başlatıldı.`);
             continue;
           }
 
