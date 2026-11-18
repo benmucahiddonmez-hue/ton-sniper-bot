@@ -1,20 +1,20 @@
 {
   "name": "ton-sniper-bot",
   "version": "1.0.0",
-  "description": "TON Multi-DEX Sniper Bot (STON.fi & DeDust)",
+  "description": "GRAM Multi-DEX Sniper Bot (STON.fi & DeDust)",
   "main": "bot.js",
   "scripts": {
-    "start": "npm install --legacy-peer-deps && node bot.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "@dedust/sdk": "^0.8.7",
-    "@ston-fi/api": "0.1.0",
-    "@ston-fi/sdk": "0.3.0",
-    "@ton/core": "0.62.0",
-    "@ton/crypto": "3.2.0",
-    "@ton/ton": "15.0.0",
-    "axios": "1.6.8",
-    "dotenv": "16.4.5",
+    "@ston-fi/api": "^0.1.2",
+    "@ston-fi/sdk": "^0.3.0",
+    "@ton/core": "^0.62.0",
+    "@ton/crypto": "^3.2.0",
+    "@ton/ton": "^15.0.0",
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5",
     "mongodb": "6.5.0",
     "node-telegram-bot-api": "0.66.0"
   }
