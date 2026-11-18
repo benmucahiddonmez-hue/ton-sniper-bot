@@ -379,3 +379,150 @@ async function startSniperWorkerLoop() {
           pools = await fetchNewTonPools(true);
         } catch (err) {
           console.error("⚠️ Ana tarama döngüsü fetch hatası:", err.message);
+          await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
+          continue;
+        }
+
+        const countBy = (list, dex) => list.filter(p => p && p.dex === dex).length;
+        const newPools = pools.filter(p => p && !seenPools[p.address]);
+        const pendingPools = pools.filter(p => p && seenPools[p.address]?.status === 'pending');
+
+        console.log(
+          `🔎 [STON.fi] Yeni: ${countBy(newPools, 'stonfi')} | Bekleyen: ${countBy(pendingPools, 'stonfi')} | Toplam uygun: ${countBy(pools, 'stonfi')}\n` +
+          `🔎 [DeDust]  Yeni: ${countBy(newPools, 'dedust')} | Bekleyen: ${countBy(pendingPools, 'dedust')} | Toplam uygun: ${countBy(pools, 'dedust')}`
+        );
+
+        for (const pool of pools) {
+          if (!botRunning) break;
+          if (!pool) continue;
+
+          const poolAddr = pool.address;
+          const tokenAddr = pool.base_token_address;
+          const tokenName = pool.name;
+
+          if (!tokenAddr || activePositions[tokenAddr]) continue;
+
+          const now = Date.now();
+          if (!seenPools[poolAddr]) {
+            console.log(`🆕 [YENİ HAVUZ YAKALANDI] Adres: ${poolAddr} (${pool.dex.toUpperCase()}) - Olgunlaşma süresi (60sn).`);
+            seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
+            await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
+            continue;
+          }
+
+          let poolInfo = seenPools[poolAddr];
+          if (poolInfo.status !== 'pending') continue;
+          
+          if ((now - poolInfo.firstSeen) < POOL_MATURITY_DELAY) continue;
+
+          console.log(`🛡️ [GÜVENLİK] Havuz olgunlaştı, güvenlik taraması: ${tokenAddr}`);
+          const safety = await checkSafetyWithSimulation(tokenAddr);
+          if (safety.transient) continue;
+
+          if (safety.safe) {
+            const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
+            if (impact > 5) {
+              poolInfo.status = 'failed_permanently';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+              continue;
+            }
+
+            const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
+            if (buyResult.success) {
+              poolInfo.status = 'bought';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+
+              await savePositionToDb(tokenAddr, {
+                entryPrice: buyResult.costTon,
+                poolAddr: pool.address,
+                dex: pool.dex,
+                amount: buyResult.costTon,
+                rawBalance: buyResult.rawBalance.toString()
+              });
+
+              try {
+                await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
+              } catch (e) {}
+            } else {
+              poolInfo.status = 'failed_permanently';
+              await saveSeenPoolToDb(poolAddr, poolInfo);
+            }
+          } else {
+            poolInfo.status = 'failed_permanently';
+            await saveSeenPoolToDb(poolAddr, poolInfo);
+          }
+        }
+
+        console.log(`💤 Tarama döngüsü tamamlandı, ${SCAN_INTERVAL / 1000} saniye sonra tekrar aranacak...\n`);
+        await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
+      }
+    } catch (criticalErr) {
+      console.error("💥 Kritik Worker Döngüsü Hatası:", criticalErr.message);
+      if (botRunning) {
+        await new Promise(resolve => setTimeout(resolve, 10000));
+      }
+    }
+  }
+}
+
+bot.onText(/\/baslat/, async (msg) => {
+  if (msg.from.id !== ALLOWED_USER_ID) return;
+  try {
+    await getCtx();
+    await updateTonPrice();
+    await initDatabase();
+
+    const { wallet } = await getCtx();
+    const stats = await getWalletAndGramStats(wallet.address);
+
+    const wasRunning = botRunning;
+    botRunning = true;
+
+    if (!wasRunning) {
+      bot.sendMessage(
+        msg.chat.id, 
+        `🚀 **Debug Destekli Sniper Bot Başlatıldı!**\n\n` +
+        `🟢 **Durum:** Aktif Çalışıyor\n` +
+        `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
+        `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
+        `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
+        { parse_mode: "Markdown" }
+      );
+      startSniperWorkerLoop();
+    } else {
+      bot.sendMessage(msg.chat.id, `ℹ️ Bot zaten aktif çalışıyor.`);
+    }
+  } catch (e) {
+    bot.sendMessage(msg.chat.id, `❌ Başlatma Hatası: \`${e.message}\``);
+  }
+});
+
+bot.onText(/\/durdur/, (msg) => {
+  if (msg.from.id !== ALLOWED_USER_ID) return;
+  botRunning = false;
+  bot.sendMessage(msg.chat.id, "🛑 Bot durduruldu.").then(async () => {
+    if (dbClient) try { await dbClient.close(); } catch (e) {}
+    process.exit(0);
+  });
+});
+
+bot.onText(/\/bakiye/, async (msg) => {
+  if (msg.from.id !== ALLOWED_USER_ID) return;
+  try {
+    const { wallet } = await getCtx();
+    const stats = await getWalletAndGramStats(wallet.address);
+
+    bot.sendMessage(
+      msg.chat.id, 
+      `💰 **Cüzdan Durumu:**\n\n` +
+      `🔹 **TON:** \`${stats.balanceTon.toFixed(4)}\`\n` +
+      `🔹 **Gram:** \`${stats.gramBalance.toFixed(4)}\`\n` +
+      `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
+      { parse_mode: "Markdown" }
+    );
+  } catch (error) {
+    bot.sendMessage(msg.chat.id, `❌ Hata: \`${error.message}\``);
+  }
+});
+
+console.log("DeDust Debug Destekli Sniper Bot hazır.");
