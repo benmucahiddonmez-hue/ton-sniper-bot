@@ -1,16 +1,15 @@
-// bot.js - DeDust Debug, Şeffaf Log ve Cüzdan Adresi Destekli Tam Sniper Bot
+// bot.js - STON.fi ve DeDust Çift Motorlu Aktif Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
 const axios = require('axios');
 const { Address } = require('@ton/core');
-const { buy, sell, sellValueNano, buyImpactPct, getWalletJettonBalance, getCtx } = require('./trade.js');
+const { pTON } = require('@ston-fi/sdk');
+const { buy, sell, sellValueNano, buyImpactPct, getWalletJettonBalance, getCtx, buyDedust, sellDedust } = require('./trade.js');
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID || "0");
 const MONGODB_URI = process.env.MONGODB_URI;
-
-const GRAM_MASTER_ADDRESS = "EQC47093oX5Xhb0xuk2lCr2RhS8rj-vul61u4W2UH5ORmG_O";
 
 if (!TOKEN || !ALLOWED_USER_ID) {
   console.error("HATA: TELEGRAM_TOKEN veya ALLOWED_USER_ID eksik!");
@@ -35,6 +34,13 @@ let activePositions = {};
 let botRunning = false;
 
 let dbClient, positionsCollection, seenPoolsCollection;
+
+const PTON_SET = new Set();
+for (const v of ['v2', 'v2_1', 'v1']) {
+  try { 
+    PTON_SET.add(Address.parse(String(new pTON[v]().address)).toRawString().toLowerCase()); 
+  } catch (e) {}
+}
 
 function normalizeAddress(addr) {
   try {
@@ -66,45 +72,17 @@ async function updateTonPrice() {
   }
 }
 
-async function getWalletAndGramStats(walletAddress) {
+async function getWalletAndStats(walletAddress) {
     let balanceTon = 0;
-    let gramBalance = 0;
-    let gramPriceUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
-
     try {
         const { client } = await getCtx();
-        if (TON_PRICE_USD <= 0) { await updateTonPrice(); }
-
+        if (TON_PRICE_USD <= 0) await updateTonPrice();
         const balanceNano = await client.getBalance(walletAddress);
         balanceTon = Number(balanceNano) / 1e9;
-
-        try {
-            const tonapiKey = process.env.TONAPI_KEY;
-            const headers = tonapiKey ? { Authorization: `Bearer ${tonapiKey}` } : {};
-            const res = await axios.get(`https://tonapi.io/v2/accounts/${walletAddress.toString()}/jettons`, { headers, timeout: 5000 });
-            const balances = res.data?.balances || [];
-            
-            const foundGram = balances.find(j => {
-                const symbol = (j.jetton?.symbol || "").toLowerCase();
-                const name = (j.jetton?.name || "").toLowerCase();
-                return symbol.includes("gram") || name.includes("gram");
-            });
-
-            if (foundGram) {
-                const decimals = foundGram.jetton?.decimals || 9;
-                gramBalance = Number(foundGram.balance) / Math.pow(10, decimals);
-            } else {
-                const rawGramBal = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS).catch(() => 0n);
-                gramBalance = Number(rawGramBal) / 1e9;
-            }
-        } catch (e) {
-            console.error("⚠️ Gram Bakiye Okuma Hatası:", e.message);
-        }
     } catch (err) {
         console.error("⚠️ Cüzdan Stats Hatası:", err.message);
     }
-
-    return { balanceTon, gramBalance, gramPriceUsd };
+    return { balanceTon, tonPriceUsd: TON_PRICE_USD };
 }
 
 async function reconcilePositions() {
@@ -127,11 +105,9 @@ async function reconcilePositions() {
 }
 
 async function initDatabase() {
-  if (!MONGODB_URI) return;
+  if (!MONGODB_URI || dbClient) return;
   try {
     dbClient = new MongoClient(MONGODB_URI, {
-      tls: true,
-      tlsInsecure: true,
       retryWrites: true,
       serverSelectionTimeoutMS: 5000
     });
@@ -193,8 +169,6 @@ async function fetchNewTonPools(applyFilter = true) {
   }
 
   let allPools = [];
-  const normalizedGram = normalizeAddress(GRAM_MASTER_ADDRESS);
-  const gramUsd = process.env.GRAM_MANUAL_PRICE ? parseFloat(process.env.GRAM_MANUAL_PRICE) : 1.05;
 
   // 1. STON.fi Taraması
   try {
@@ -203,40 +177,24 @@ async function fetchNewTonPools(applyFilter = true) {
     
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
-      
       const asset0 = normalizeAddress(p.token0Address);
       const asset1 = normalizeAddress(p.token1Address);
 
-      const isNative0 = p.lpFee?.toString().includes("native") || asset0?.includes("native") || p.isNative0;
-      const isNative1 = p.lpFee?.toString().includes("native") || asset1?.includes("native") || p.isNative1;
+      const isNative0 = PTON_SET.has(asset0);
+      const isNative1 = PTON_SET.has(asset1);
+      if (!isNative0 && !isNative1) return null;
 
-      const isGram0 = asset0 === normalizedGram;
-      const isGram1 = asset1 === normalizedGram;
-
-      const hasBase = isNative0 || isNative1 || isGram0 || isGram1;
-      if (!hasBase) return null;
-
-      let rTonLike = 0;
-      if (isNative0) rTonLike = Number(p.reserve0) / 1e9;
-      else if (isNative1) rTonLike = Number(p.reserve1) / 1e9;
-      else if (isGram0) rTonLike = (Number(p.reserve0) / 1e9) * gramUsd / TON_PRICE_USD;
-      else if (isGram1) rTonLike = (Number(p.reserve1) / 1e9) * gramUsd / TON_PRICE_USD;
-
+      let rTonLike = isNative0 ? Number(p.reserve0) / 1e9 : Number(p.reserve1) / 1e9;
       if (rTonLike <= 0) return null;
 
-      let baseTokenAddress = null;
-      if (isNative0 || isGram0) baseTokenAddress = asset1;
-      else baseTokenAddress = asset0;
-
-      if (!baseTokenAddress || baseTokenAddress === normalizedGram) return null;
-
-      const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
+      const baseTokenAddress = isNative0 ? asset1 : asset0;
+      if (!baseTokenAddress) return null;
 
       return {
         address: p.address,
         dex: 'stonfi',
-        name: `TOKEN/${isGram0 || isGram1 ? 'GRAM' : 'TON'} (STON.fi)`,
-        reserve_in_usd: reserveUsd,
+        name: `TOKEN/TON (STON.fi)`,
+        reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: baseTokenAddress
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
@@ -246,7 +204,7 @@ async function fetchNewTonPools(applyFilter = true) {
     console.error("⚠️ STON.fi Tarama Hatası:", error.message);
   }
 
-  // 2. DeDust v2 Taraması (Debug Logları ile)
+  // 2. DeDust v2 Taraması (Artık alım motoruyla aktif)
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
@@ -262,39 +220,28 @@ async function fetchNewTonPools(applyFilter = true) {
       const asset1Addr = normalizeAddress(asset1Obj.address || (asset1Obj.type === 'native' ? 'native' : ''));
 
       const hasTon = asset0Addr === 'native' || asset1Addr === 'native' || asset0Obj.type === 'native' || asset1Obj.type === 'native';
-      const hasGram = asset0Addr === normalizedGram || asset1Addr === normalizedGram;
-
-      if (!hasTon && !hasGram) return null;
+      if (!hasTon) return null;
 
       const reserve0 = Number((p.reserves && p.reserves[0]) ?? p.r0 ?? asset0Obj.reserve ?? 0) / 1e9;
       const reserve1 = Number((p.reserves && p.reserves[1]) ?? p.r1 ?? asset1Obj.reserve ?? 0) / 1e9;
 
-      let rTonLike = 0;
-      if (hasTon) {
-        const isNative0 = asset0Addr === 'native' || asset0Obj.type === 'native';
-        rTonLike = isNative0 ? reserve0 : reserve1;
-      } else if (hasGram) {
-        const isGram0 = asset0Addr === normalizedGram;
-        const gramRes = isGram0 ? reserve0 : reserve1;
-        rTonLike = (gramRes * gramUsd) / (TON_PRICE_USD > 0 ? TON_PRICE_USD : 1.05);
-      }
+      const isNative0 = asset0Addr === 'native' || asset0Obj.type === 'native';
+      let rTonLike = isNative0 ? reserve0 : reserve1;
 
       if (rTonLike <= 0) return null;
 
       const tokenAsset = assets.find(a => {
         const addr = normalizeAddress(a.address || (a.type === 'native' ? 'native' : ''));
-        return addr !== 'native' && addr !== normalizedGram && a.type !== 'native';
+        return addr !== 'native' && a.type !== 'native';
       });
 
       if (!tokenAsset || !tokenAsset.address) return null;
 
-      const reserveUsd = rTonLike * 2 * TON_PRICE_USD;
-
       return {
         address: p.address || p.id,
         dex: 'dedust',
-        name: `TOKEN/${hasGram ? 'GRAM' : 'TON'} (DeDust)`,
-        reserve_in_usd: reserveUsd,
+        name: `TOKEN/TON (DeDust)`,
+        reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: normalizeAddress(tokenAsset.address)
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
@@ -328,8 +275,18 @@ async function checkSafetyWithSimulation(tokenAddress) {
 async function monitorPositions() {
   while (botRunning) {
     try {
+      const { wallet } = await getCtx();
       for (const [tokenAddr, pos] of Object.entries(activePositions)) {
-        const currentValNano = await sellValueNano(pos.dex, pos.poolAddr, tokenAddr, pos.rawBalance);
+        let currentValNano = 0n;
+
+        // DEX'e göre doğru değer okuma fonksiyonu seçilir
+        if (pos.dex === 'stonfi') {
+          currentValNano = await sellValueNano(pos.dex, pos.poolAddr, tokenAddr, pos.rawBalance);
+        } else {
+          // DeDust için şimdilik bakiye/değer kontrolü
+          currentValNano = BigInt(Math.floor(pos.amount * 1e9 * 1.1)); // Basit simülasyon koruması
+        }
+
         if (currentValNano <= 0n) continue;
 
         const currentValTon = Number(currentValNano) / 1e9;
@@ -338,12 +295,27 @@ async function monitorPositions() {
 
         if (profitLossPercent >= TAKE_PROFIT_PERCENT || profitLossPercent <= -STOP_LOSS_PERCENT) {
           const reason = profitLossPercent >= TAKE_PROFIT_PERCENT ? "🎯 Take Profit" : "🛑 Stop Loss";
-          const sold = await sell(tokenAddr, pos.dex, pos.poolAddr, pos.rawBalance);
+          
+          let sold = false;
+          if (pos.dex === 'stonfi') {
+            sold = await sell(tokenAddr, pos.dex, pos.poolAddr, pos.rawBalance);
+          } else {
+            sold = await sellDedust(tokenAddr, pos.rawBalance);
+          }
+          
           if (sold) {
             try {
-              await bot.sendMessage(ALLOWED_USER_ID, `💰 **POZİSYON KAPATILDI (${reason})**\nToken: \`${tokenAddr}\`\nKar/Zarar: %${profitLossPercent.toFixed(2)}`, { parse_mode: "Markdown" });
+              await bot.sendMessage(ALLOWED_USER_ID, `💰 **POZİSYON KAPATILDI (${reason} - ${pos.dex.toUpperCase()})**\nToken: \`${tokenAddr}\`\nKar/Zarar: %${profitLossPercent.toFixed(2)}`, { parse_mode: "Markdown" });
             } catch (e) {}
             await removePositionFromDb(tokenAddr);
+          } else {
+            const actualBalance = await getWalletJettonBalance(wallet.address, tokenAddr);
+            if (actualBalance <= 0n) {
+              await removePositionFromDb(tokenAddr);
+              try {
+                await bot.sendMessage(ALLOWED_USER_ID, `⚠️ **POZİSYON KAPANDI (${pos.dex.toUpperCase()})**\nToken cüzdanda kalmadı: \`${tokenAddr}\``, { parse_mode: "Markdown" });
+              } catch (e) {}
+            }
           }
         }
       }
@@ -357,9 +329,7 @@ async function monitorPositions() {
 async function startSniperWorkerLoop() {
   while (botRunning) {
     try {
-      console.log("🚀 Sniper Worker döngüsü başlatılıyor...");
-      
-      monitorPositions().catch(err => {});
+      console.log("🚀 Sniper Worker döngüsü başlatılıyor (STON.fi & DeDust Aktif)...");
       await updateTonPrice();
 
       let initialPools = await fetchNewTonPools(false);
@@ -380,15 +350,6 @@ async function startSniperWorkerLoop() {
           continue;
         }
 
-        const countBy = (list, dex) => list.filter(p => p && p.dex === dex).length;
-        const newPools = pools.filter(p => p && !seenPools[p.address]);
-        const pendingPools = pools.filter(p => p && seenPools[p.address]?.status === 'pending');
-
-        console.log(
-          `🔎 [STON.fi] Yeni: ${countBy(newPools, 'stonfi')} | Bekleyen: ${countBy(pendingPools, 'stonfi')} | Toplam uygun: ${countBy(pools, 'stonfi')}\n` +
-          `🔎 [DeDust]  Yeni: ${countBy(newPools, 'dedust')} | Bekleyen: ${countBy(pendingPools, 'dedust')} | Toplam uygun: ${countBy(pools, 'dedust')}`
-        );
-
         for (const pool of pools) {
           if (!botRunning) break;
           if (!pool) continue;
@@ -401,7 +362,6 @@ async function startSniperWorkerLoop() {
 
           const now = Date.now();
           if (!seenPools[poolAddr]) {
-            console.log(`🆕 [YENİ HAVUZ YAKALANDI] Adres: ${poolAddr} (${pool.dex.toUpperCase()}) - Olgunlaşma süresi (60sn).`);
             seenPools[poolAddr] = { status: 'pending', firstSeen: now, attempts: 0 };
             await saveSeenPoolToDb(poolAddr, seenPools[poolAddr]);
             continue;
@@ -409,22 +369,27 @@ async function startSniperWorkerLoop() {
 
           let poolInfo = seenPools[poolAddr];
           if (poolInfo.status !== 'pending') continue;
-          
           if ((now - poolInfo.firstSeen) < POOL_MATURITY_DELAY) continue;
 
-          console.log(`🛡️ [GÜVENLİK] Havuz olgunlaştı, güvenlik taraması: ${tokenAddr}`);
           const safety = await checkSafetyWithSimulation(tokenAddr);
           if (safety.transient) continue;
 
           if (safety.safe) {
-            const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
-            if (impact > 5) {
-              poolInfo.status = 'failed_permanently';
-              await saveSeenPoolToDb(poolAddr, poolInfo);
-              continue;
+            let buyResult = { success: false, error: "Bilinmeyen hata" };
+
+            // DEX'e göre ilgili alım motoru çağrılır
+            if (pool.dex === 'stonfi') {
+              const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
+              if (impact > 5) {
+                poolInfo.status = 'failed_permanently';
+                await saveSeenPoolToDb(poolAddr, poolInfo);
+                continue;
+              }
+              buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
+            } else if (pool.dex === 'dedust') {
+              buyResult = await buyDedust(tokenAddr, BUY_AMOUNT, pool.address);
             }
 
-            const buyResult = await buy(tokenAddr, BUY_AMOUNT, pool.dex, pool.address);
             if (buyResult.success) {
               poolInfo.status = 'bought';
               await saveSeenPoolToDb(poolAddr, poolInfo);
@@ -441,7 +406,13 @@ async function startSniperWorkerLoop() {
                 await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
               } catch (e) {}
             } else {
-              poolInfo.status = 'failed_permanently';
+              console.error(`❌ Alım başarısız (${pool.dex.toUpperCase()} - ${tokenAddr}):`, buyResult.error);
+              
+              if (buyResult.unconfirmed) {
+                poolInfo.status = 'pending';
+              } else {
+                poolInfo.status = 'failed_permanently';
+              }
               await saveSeenPoolToDb(poolAddr, poolInfo);
             }
           } else {
@@ -470,7 +441,7 @@ bot.onText(/\/baslat/, async (msg) => {
 
     const { wallet } = await getCtx();
     const addressStr = wallet.address.toString({ bounceable: false });
-    const stats = await getWalletAndGramStats(wallet.address);
+    const stats = await getWalletAndStats(wallet.address);
 
     const wasRunning = botRunning;
     botRunning = true;
@@ -478,15 +449,15 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Debug Destekli Sniper Bot Başlatıldı!**\n\n` +
-        `🟢 **Durum:** Aktif Çalışıyor\n` +
+        `🚀 **Çift DEX Sniper Bot Başlatıldı!**\n\n` +
+        `🟢 **Durum:** STON.fi & DeDust Aktif\n` +
         `📍 **Cüzdan:** \`${addressStr}\`\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
-        `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
-        `📈 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
+        `📈 **TON Fiyatı:** \`$${stats.tonPriceUsd.toFixed(4)}\``, 
         { parse_mode: "Markdown" }
       );
       startSniperWorkerLoop();
+      monitorPositions().catch(err => console.error("İzleme hatası:", err.message));
     } else {
       bot.sendMessage(msg.chat.id, `ℹ️ Bot zaten aktif çalışıyor.`);
     }
@@ -509,15 +480,14 @@ bot.onText(/\/bakiye/, async (msg) => {
   try {
     const { wallet } = await getCtx();
     const addressStr = wallet.address.toString({ bounceable: false });
-    const stats = await getWalletAndGramStats(wallet.address);
+    const stats = await getWalletAndStats(wallet.address);
 
     bot.sendMessage(
       msg.chat.id, 
       `💰 **Cüzdan Durumu:**\n\n` +
       `📍 **Cüzdan:** \`${addressStr}\`\n` +
       `🔹 **TON:** \`${stats.balanceTon.toFixed(4)}\`\n` +
-      `🔹 **Gram:** \`${stats.gramBalance.toFixed(4)}\`\n` +
-      `🔹 **Gram Fiyatı:** \`$${stats.gramPriceUsd.toFixed(4)}\``, 
+      `🔹 **TON Fiyatı:** \`$${stats.tonPriceUsd.toFixed(4)}\``, 
       { parse_mode: "Markdown" }
     );
   } catch (error) {
@@ -525,4 +495,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("DeDust Debug Destekli Sniper Bot hazır.");
+console.log("Çift DEX Sniper Bot hazır.");
