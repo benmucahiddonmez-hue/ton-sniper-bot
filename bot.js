@@ -1,4 +1,4 @@
-// bot.js - Şeffaf Log Destekli Çift DEX Sniper Bot
+// bot.js - DeDust Debug ve Şeffaf Log Destekli Sniper Bot
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
@@ -60,6 +60,7 @@ async function updateTonPrice() {
     lastPriceUpdate = Date.now();
     return true;
   } catch (error) {
+    console.error("⚠️ TON Fiyat Güncelleme Hatası:", error.message);
     if (TON_PRICE_USD <= 0) TON_PRICE_USD = 5.0;
     return false;
   }
@@ -96,8 +97,12 @@ async function getWalletAndGramStats(walletAddress) {
                 const rawGramBal = await getWalletJettonBalance(walletAddress, GRAM_MASTER_ADDRESS).catch(() => 0n);
                 gramBalance = Number(rawGramBal) / 1e9;
             }
-        } catch (e) {}
-    } catch (err) {}
+        } catch (e) {
+            console.error("⚠️ Gram Bakiye Okuma Hatası:", e.message);
+        }
+    } catch (err) {
+        console.error("⚠️ Cüzdan Stats Hatası:", err.message);
+    }
 
     return { balanceTon, gramBalance, gramPriceUsd };
 }
@@ -116,7 +121,9 @@ async function reconcilePositions() {
                 await positionsCollection.updateOne({ tokenAddress: tokenAddr }, { $set: { rawBalance: pos.rawBalance } });
             }
         }
-    } catch (err) {}
+    } catch (err) {
+        console.error("⚠️ Pozisyon Eşitleme Hatası:", err.message);
+    }
 }
 
 async function initDatabase() {
@@ -144,7 +151,10 @@ async function initDatabase() {
     });
 
     await reconcilePositions();
-  } catch (err) {}
+    console.log("🗄️ MongoDB bağlantısı ve veri senkronizasyonu başarılı.");
+  } catch (err) {
+    console.error("❌ MongoDB Bağlantı Hatası:", err.message);
+  }
 }
 
 async function savePositionToDb(tokenAddress, posData) {
@@ -152,7 +162,9 @@ async function savePositionToDb(tokenAddress, posData) {
   if (!positionsCollection) return;
   try {
     await positionsCollection.updateOne({ tokenAddress }, { $set: { tokenAddress, ...posData } }, { upsert: true });
-  } catch (err) {}
+  } catch (err) {
+    console.error("⚠️ Pozisyon Kaydetme Hatası:", err.message);
+  }
 }
 
 async function removePositionFromDb(tokenAddress) {
@@ -160,7 +172,9 @@ async function removePositionFromDb(tokenAddress) {
   if (!positionsCollection) return;
   try {
     await positionsCollection.deleteOne({ tokenAddress });
-  } catch (err) {}
+  } catch (err) {
+    console.error("⚠️ Pozisyon Silme Hatası:", err.message);
+  }
 }
 
 async function saveSeenPoolToDb(poolAddr, poolData) {
@@ -168,10 +182,12 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   if (!seenPoolsCollection) return;
   try {
     await seenPoolsCollection.updateOne({ poolAddr }, { $set: { poolAddr, ...poolData } }, { upsert: true });
-  } catch (err) {}
+  } catch (err) {
+    console.error("⚠️ Görülen Havuz Kaydetme Hatası:", err.message);
+  }
 }
 
-// Orijinal ve Çalışan fetchNewTonPools Fonksiyonu
+// Güncellenmiş ve Hata Korumalı fetchNewTonPools Fonksiyonu
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     await updateTonPrice();
@@ -227,33 +243,44 @@ async function fetchNewTonPools(applyFilter = true) {
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
     
     allPools.push(...stonPools);
-  } catch (error) {}
+  } catch (error) {
+    console.error("⚠️ STON.fi Tarama Hatası:", error.message);
+  }
 
-  // 2. DeDust v2 Taraması
+  // 2. DeDust v2 Taraması (Debug Logları ile)
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
+
+    // DeDust ham veri yapısını incelemek için debug logu
+    console.log("DeDust örnek:", JSON.stringify(dedustPoolsList[0]), "| toplam:", dedustPoolsList.length);
 
     const dedustPools = dedustPoolsList.map(p => {
       const assets = p.assets || [];
       if (assets.length !== 2) return null;
 
-      const asset0Addr = normalizeAddress(assets[0].address || (assets[0].type === 'native' ? 'native' : ''));
-      const asset1Addr = normalizeAddress(assets[1].address || (assets[1].type === 'native' ? 'native' : ''));
+      const asset0Obj = assets[0];
+      const asset1Obj = assets[1];
 
-      const hasTon = asset0Addr === 'native' || asset1Addr === 'native';
+      const asset0Addr = normalizeAddress(asset0Obj.address || (asset0Obj.type === 'native' ? 'native' : ''));
+      const asset1Addr = normalizeAddress(asset1Obj.address || (asset1Obj.type === 'native' ? 'native' : ''));
+
+      const hasTon = asset0Addr === 'native' || asset1Addr === 'native' || asset0Obj.type === 'native' || asset1Obj.type === 'native';
       const hasGram = asset0Addr === normalizedGram || asset1Addr === normalizedGram;
 
       if (!hasTon && !hasGram) return null;
 
-      const reserve0 = Number(p.r0 || assets[0].reserve || 0) / 1e9;
-      const reserve1 = Number(p.r1 || assets[1].reserve || 0) / 1e9;
+      // Genişletilmiş rezerv okuma mantığı (reserves dizisi veya r0/r1 desteği)
+      const reserve0 = Number((p.reserves && p.reserves[0]) ?? p.r0 ?? asset0Obj.reserve ?? 0) / 1e9;
+      const reserve1 = Number((p.reserves && p.reserves[1]) ?? p.r1 ?? asset1Obj.reserve ?? 0) / 1e9;
 
       let rTonLike = 0;
       if (hasTon) {
-        rTonLike = asset0Addr === 'native' ? reserve0 : reserve1;
+        const isNative0 = asset0Addr === 'native' || asset0Obj.type === 'native';
+        rTonLike = isNative0 ? reserve0 : reserve1;
       } else if (hasGram) {
-        const gramRes = asset0Addr === normalizedGram ? reserve0 : reserve1;
+        const isGram0 = asset0Addr === normalizedGram;
+        const gramRes = isGram0 ? reserve0 : reserve1;
         rTonLike = (gramRes * gramUsd) / (TON_PRICE_USD > 0 ? TON_PRICE_USD : 1.05);
       }
 
@@ -261,7 +288,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
       const tokenAsset = assets.find(a => {
         const addr = normalizeAddress(a.address || (a.type === 'native' ? 'native' : ''));
-        return addr !== 'native' && addr !== normalizedGram;
+        return addr !== 'native' && addr !== normalizedGram && a.type !== 'native';
       });
 
       if (!tokenAsset || !tokenAsset.address) return null;
@@ -277,8 +304,11 @@ async function fetchNewTonPools(applyFilter = true) {
       };
     }).filter(p => p !== null && (!applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD));
 
+    console.log(`📡 [DeDust] API tarandı | Filtrelenen uygun havuz: ${dedustPools.length}`);
     allPools.push(...dedustPools);
-  } catch (error) {}
+  } catch (error) {
+    console.error("⚠️ DeDust Tarama Hatası:", error.message);
+  }
 
   return allPools;
 }
@@ -323,7 +353,9 @@ async function monitorPositions() {
           }
         }
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("⚠️ Pozisyon İzleme Hatası:", err.message);
+    }
     await new Promise(resolve => setTimeout(resolve, 20000));
   }
 }
@@ -349,11 +381,11 @@ async function startSniperWorkerLoop() {
         try {
           pools = await fetchNewTonPools(true);
         } catch (err) {
+          console.error("⚠️ Ana tarama döngüsü fetch hatası:", err.message);
           await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
           continue;
         }
 
-        // Seninki ile birebir uyumlu şeffaf log bloğu
         const countBy = (list, dex) => list.filter(p => p && p.dex === dex).length;
         const newPools = pools.filter(p => p && !seenPools[p.address]);
         const pendingPools = pools.filter(p => p && seenPools[p.address]?.status === 'pending');
@@ -428,6 +460,7 @@ async function startSniperWorkerLoop() {
         await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
       }
     } catch (criticalErr) {
+      console.error("💥 Kritik Worker Döngüsü Hatası:", criticalErr.message);
       if (botRunning) {
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
@@ -451,7 +484,7 @@ bot.onText(/\/baslat/, async (msg) => {
     if (!wasRunning) {
       bot.sendMessage(
         msg.chat.id, 
-        `🚀 **Şeffaf Loglu Sniper Bot Başlatıldı!**\n\n` +
+        `🚀 **Debug Destekli Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** Aktif Çalışıyor\n` +
         `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
         `🪙 **Gram:** \`${stats.gramBalance.toFixed(2)}\`\n` +
@@ -495,4 +528,4 @@ bot.onText(/\/bakiye/, async (msg) => {
   }
 });
 
-console.log("Şeffaf Log Destekli Sniper Bot hazır.");
+console.log("DeDust Debug Destekli Sniper Bot hazır.");
