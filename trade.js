@@ -1,6 +1,6 @@
-// trade.js - Güncellenmiş STON.fi Simülasyon ve DeDust İşlem Motoru
+// trade.js - W5 Cüzdan Tam Uyumlu İşlem Motoru
 require('dotenv').config();
-const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { TonClient, WalletContractV5R1, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { Address } = require('@ton/core');
 const { DEX, pTON } = require('@ston-fi/sdk');
@@ -12,7 +12,7 @@ let cachedCtx = null;
 async function getCtx() {
   if (cachedCtx) return cachedCtx;
   const endpoint = process.env.TON_RPC_ENDPOINT || 'https://toncenter.com/api/v2/jsonRPC';
-  const apiKey = process.env.TONCENTER_API_KEY; // <-- DÜZELTİLDİ: Toncenter anahtarı doğru parametreye oturtuldu
+  const apiKey = process.env.TONCENTER_API_KEY; 
   const client = new TonClient({ endpoint, apiKey });
   
   const mnemonicStr = process.env.WALLET_MNEMONIC || "";
@@ -21,7 +21,12 @@ async function getCtx() {
 
   const keyPair = await mnemonicToPrivateKey(mnemonic);
   const workchain = 0;
-  const wallet = WalletContractV4.create({ workchain, publicKey: keyPair.publicKey });
+  
+  // W5 cüzdanı (WalletContractV5R1) ile Tonkeeper'daki asıl adresinle birebir eşleşme
+  const wallet = WalletContractV5R1.create({ 
+    workchain, 
+    publicKey: keyPair.publicKey 
+  });
   const walletContract = client.open(wallet);
 
   cachedCtx = { client, wallet: walletContract, keyPair, workchain };
@@ -181,7 +186,7 @@ async function getWalletJettonBalance(walletAddress, jettonMasterAddress) {
   } catch (e) {
     try {
       const { client } = await getCtx();
-      const res = await client.runMethod(Address.parse(walletAddress), "get_wallet_data", []);
+      await client.runMethod(Address.parse(walletAddress), "get_wallet_data", []);
       return 0n;
     } catch (ex) {
       return 0n;
