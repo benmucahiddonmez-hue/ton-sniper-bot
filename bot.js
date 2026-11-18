@@ -170,7 +170,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması
+  // 1. STON.fi Taraması (Esnek Eşleşme)
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
@@ -181,8 +181,9 @@ async function fetchNewTonPools(applyFilter = true) {
       const asset0 = normalizeAddress(p.token0_address || p.token0Address);
       const asset1 = normalizeAddress(p.token1_address || p.token1Address);
 
-      const isNative0 = PTON_SET.has(asset0) || asset0 === 'native';
-      const isNative1 = PTON_SET.has(asset1) || asset1 === 'native';
+      const isNative0 = PTON_SET.has(asset0) || asset0 === 'native' || asset0.includes('pton') || asset0.includes('eqb3ncybutj');
+      const isNative1 = PTON_SET.has(asset1) || asset1 === 'native' || asset1.includes('pton') || asset1.includes('eqb3ncybutj');
+      
       if (!isNative0 && !isNative1) return null;
 
       let rTonLike = isNative0 ? Number(p.reserve0 || p.r0 || 0) / 1e9 : Number(p.reserve1 || p.r1 || 0) / 1e9;
