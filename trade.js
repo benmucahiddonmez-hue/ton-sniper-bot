@@ -1,6 +1,6 @@
-// trade.js - WalletV5 Destekli, Adres Gösteren & RPC Tabanlı Modül
+// trade.js - Kesin V4 Cüzdan Adresi Sabitli Modül
 require('dotenv').config();
-const { TonClient } = require('@ton/ton');
+const { TonClient, WalletContractV4 } = require('@ton/ton');
 const { Address, internal } = require('@ton/core');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { StonApiClient } = require('@ston-fi/api');
@@ -40,20 +40,11 @@ async function getCtx() {
 
     cachedKeyPair = await mnemonicToPrivateKey(mnemonic);
     
-    // Güncel cüzdan standartları (Önce WalletV5 dener, desteklenmiyorsa V4'e düşer)
-    let wallet;
-    try {
-        const { WalletContractV5 } = require('@ton/ton');
-        wallet = WalletContractV5.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
-    } catch (e) {
-        const { WalletContractV4 } = require('@ton/ton');
-        wallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
-    }
-    
-    cachedWallet = wallet;
+    // Doğrudan WalletContractV4 kullanarak cüzdanı kelimelerinden türetiyoruz (Tonkeeper ile birebir uyumlu)
+    cachedWallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
 
-    // Cüzdan adresini logla ki hangi adrese baktığını net görebilelim
-    console.log(`📍 Aktif Cüzdan Adresi: ${cachedWallet.address.toString({ bounceable: false })}`);
+    // Cüzdan adresini logla ki telefonundaki cüzdanla aynı olup olmadığını hemen görebil
+    console.log(`📍 Doğrulanmış Aktif Cüzdan Adresi: ${cachedWallet.address.toString({ bounceable: false })}`);
 
     return { 
         client: cachedClient, 
