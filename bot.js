@@ -61,28 +61,28 @@ async function updateTonPrice() {
       }
     );
     const price = Number(response.data?.['the-open-network']?.usd);
-    if (!Number.isFinite(price) || price <= 0) throw new Error("Geçersiz TON fiyatı");
+    if (!Number.isFinite(price) || price <= 0) throw new Error("Geçersiz fiyat");
     TON_PRICE_USD = price;
     lastPriceUpdate = Date.now();
     return true;
   } catch (error) {
-    console.error("⚠️ TON Fiyat Güncelleme Hatası:", error.message);
+    console.error("⚠️ Fiyat Güncelleme Hatası:", error.message);
     if (TON_PRICE_USD <= 0) TON_PRICE_USD = 5.0;
     return false;
   }
 }
 
 async function getWalletAndStats(walletAddress) {
-    let balanceTon = 0;
+    let balanceGram = 0;
     try {
         const { client } = await getCtx();
         if (TON_PRICE_USD <= 0) await updateTonPrice();
         const balanceNano = await client.getBalance(walletAddress);
-        balanceTon = Number(balanceNano) / 1e9;
+        balanceGram = Number(balanceNano) / 1e9;
     } catch (err) {
         console.error("⚠️ Cüzdan Stats Hatası:", err.message);
     }
-    return { balanceTon, tonPriceUsd: TON_PRICE_USD };
+    return { balanceGram, priceUsd: TON_PRICE_USD };
 }
 
 async function reconcilePositions() {
@@ -170,21 +170,21 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması
+  // 1. STON.fi Taraması (Doğrudan API Üzerinden)
   try {
-    const { stonApi } = await getCtx();
-    const poolsList = await stonApi.getPools();
+    const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
+    const poolsList = res.data?.pool_list || res.data || [];
     
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
-      const asset0 = normalizeAddress(p.token0Address);
-      const asset1 = normalizeAddress(p.token1Address);
+      const asset0 = normalizeAddress(p.token0_address || p.token0Address);
+      const asset1 = normalizeAddress(p.token1_address || p.token1Address);
 
-      const isNative0 = PTON_SET.has(asset0);
-      const isNative1 = PTON_SET.has(asset1);
+      const isNative0 = PTON_SET.has(asset0) || asset0 === 'native';
+      const isNative1 = PTON_SET.has(asset1) || asset1 === 'native';
       if (!isNative0 && !isNative1) return null;
 
-      let rTonLike = isNative0 ? Number(p.reserve0) / 1e9 : Number(p.reserve1) / 1e9;
+      let rTonLike = isNative0 ? Number(p.reserve0 || p.r0 || 0) / 1e9 : Number(p.reserve1 || p.r1 || 0) / 1e9;
       if (rTonLike <= 0) return null;
 
       const baseTokenAddress = isNative0 ? asset1 : asset0;
@@ -193,7 +193,7 @@ async function fetchNewTonPools(applyFilter = true) {
       return {
         address: p.address,
         dex: 'stonfi',
-        name: `TOKEN/TON (STON.fi)`,
+        name: `TOKEN/GRAM (STON.fi)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: baseTokenAddress
       };
@@ -204,7 +204,7 @@ async function fetchNewTonPools(applyFilter = true) {
     console.error("⚠️ STON.fi Tarama Hatası:", error.message);
   }
 
-  // 2. DeDust v2 Taraması (Artık alım motoruyla aktif)
+  // 2. DeDust v2 Taraması
   try {
     const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
     const dedustPoolsList = dedustRes.data || [];
@@ -240,7 +240,7 @@ async function fetchNewTonPools(applyFilter = true) {
       return {
         address: p.address || p.id,
         dex: 'dedust',
-        name: `TOKEN/TON (DeDust)`,
+        name: `TOKEN/GRAM (DeDust)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
         base_token_address: normalizeAddress(tokenAsset.address)
       };
@@ -279,12 +279,10 @@ async function monitorPositions() {
       for (const [tokenAddr, pos] of Object.entries(activePositions)) {
         let currentValNano = 0n;
 
-        // DEX'e göre doğru değer okuma fonksiyonu seçilir
         if (pos.dex === 'stonfi') {
           currentValNano = await sellValueNano(pos.dex, pos.poolAddr, tokenAddr, pos.rawBalance);
         } else {
-          // DeDust için şimdilik bakiye/değer kontrolü
-          currentValNano = BigInt(Math.floor(pos.amount * 1e9 * 1.1)); // Basit simülasyon koruması
+          currentValNano = BigInt(Math.floor(pos.amount * 1e9 * 1.1));
         }
 
         if (currentValNano <= 0n) continue;
@@ -377,7 +375,6 @@ async function startSniperWorkerLoop() {
           if (safety.safe) {
             let buyResult = { success: false, error: "Bilinmeyen hata" };
 
-            // DEX'e göre ilgili alım motoru çağrılır
             if (pool.dex === 'stonfi') {
               const impact = await buyImpactPct(pool.dex, pool.address, tokenAddr, BUY_AMOUNT);
               if (impact > 5) {
@@ -403,7 +400,7 @@ async function startSniperWorkerLoop() {
               });
 
               try {
-                await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
+                await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (${BUY_AMOUNT} GRAM - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
               } catch (e) {}
             } else {
               console.error(`❌ Alım başarısız (${pool.dex.toUpperCase()} - ${tokenAddr}):`, buyResult.error);
@@ -452,8 +449,8 @@ bot.onText(/\/baslat/, async (msg) => {
         `🚀 **Çift DEX Sniper Bot Başlatıldı!**\n\n` +
         `🟢 **Durum:** STON.fi & DeDust Aktif\n` +
         `📍 **Cüzdan:** \`${addressStr}\`\n` +
-        `💰 **TON:** \`${stats.balanceTon.toFixed(2)}\`\n` +
-        `📈 **TON Fiyatı:** \`$${stats.tonPriceUsd.toFixed(4)}\``, 
+        `💰 **GRAM:** \`${stats.balanceGram.toFixed(2)}\`\n` +
+        `📈 **Fiyat:** \`$${stats.priceUsd.toFixed(4)}\``, 
         { parse_mode: "Markdown" }
       );
       startSniperWorkerLoop();
@@ -486,8 +483,8 @@ bot.onText(/\/bakiye/, async (msg) => {
       msg.chat.id, 
       `💰 **Cüzdan Durumu:**\n\n` +
       `📍 **Cüzdan:** \`${addressStr}\`\n` +
-      `🔹 **TON:** \`${stats.balanceTon.toFixed(4)}\`\n` +
-      `🔹 **TON Fiyatı:** \`$${stats.tonPriceUsd.toFixed(4)}\``, 
+      `🔹 **GRAM:** \`${stats.balanceGram.toFixed(4)}\`\n` +
+      `🔹 **Fiyat:** \`$${stats.priceUsd.toFixed(4)}\``, 
       { parse_mode: "Markdown" }
     );
   } catch (error) {
