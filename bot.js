@@ -170,11 +170,16 @@ async function fetchNewTonPools(applyFilter = true) {
 
   let allPools = [];
 
-  // 1. STON.fi Taraması (Güncellenmiş Esnek Filtre)
+  // 1. STON.fi Taraması (Yapı İnceleme Logları Eklendi)
   try {
     const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
     const poolsList = res.data?.pool_list || res.data || [];
     console.log(`🔍 STON.fi API'den toplam ${poolsList.length} ham havuz çekildi.`);
+    
+    // Ham verinin yapısını görmek için ilk havuzu logluyoruz
+    if (poolsList.length > 0) {
+      console.log("🛠️ STON.fi İlk Havuz Örneği:", JSON.stringify(poolsList[0], null, 2));
+    }
     
     const stonPools = poolsList.map(p => {
       if (p.deprecated) return null;
