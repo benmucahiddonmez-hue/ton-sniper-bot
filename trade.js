@@ -1,6 +1,7 @@
-// trade.js - RPC Tabanlı, Tonapi Bağımlılığı Olmayan Güvenli Modül
+// trade.js - RPC Tabanlı, TonClient Düzeltilmiş Güvenli Modül
 require('dotenv').config();
-const { TonClient, WalletContractV4, internal, Address } = require('@ton/core');
+const { TonClient } = require('@ton/ton');
+const { Address, internal } = require('@ton/core');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { StonApiClient } = require('@ston-fi/api');
 const { DEX: StonDEX, pTON } = require('@ston-fi/sdk');
@@ -38,6 +39,7 @@ async function getCtx() {
     }
 
     cachedKeyPair = await mnemonicToPrivateKey(mnemonic);
+    const { WalletContractV4 } = require('@ton/ton');
     cachedWallet = WalletContractV4.create({ workchain: 0, publicKey: cachedKeyPair.publicKey });
 
     return { 
