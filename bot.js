@@ -173,6 +173,34 @@ async function saveSeenPoolToDb(poolAddr, poolData) {
   }
 }
 
+async function saveSeenPoolsBatchToDb(entries) {
+  if (!entries || entries.length === 0) return;
+
+  for (const { poolAddr, poolData } of entries) {
+    seenPools[poolAddr] = poolData;
+  }
+
+  if (!seenPoolsCollection) return;
+
+  const chunkSize = 1000;
+  for (let i = 0; i < entries.length; i += chunkSize) {
+    const chunk = entries.slice(i, i + chunkSize);
+    const ops = chunk.map(({ poolAddr, poolData }) => ({
+      updateOne: {
+        filter: { poolAddr },
+        update: { $set: { poolAddr, ...poolData } },
+        upsert: true
+      }
+    }));
+
+    try {
+      await seenPoolsCollection.bulkWrite(ops, { ordered: false });
+    } catch (err) {
+      console.error(`⚠️ Toplu Havuz Kaydetme Hatası (parça ${Math.floor(i / chunkSize) + 1}):`, err.message);
+    }
+  }
+}
+
 async function fetchNewTonPools(applyFilter = true) {
   if (TON_PRICE_USD <= 0 || Date.now() - lastPriceUpdate > 120000) {
     await updateTonPrice();
@@ -182,7 +210,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   // 1. STON.fi Taraması
   try {
-    const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 8000 });
+    const res = await axios.get('https://api.ston.fi/v1/pools', { timeout: 10000 });
     const poolsList = res.data?.pool_list || res.data || [];
     console.log(`🔍 STON.fi API'den toplam ${poolsList.length} ham havuz çekildi.`);
     
@@ -213,7 +241,9 @@ async function fetchNewTonPools(applyFilter = true) {
 
     console.log(`🔹 STON.fi TON eşleşmeli havuz: ${stonPools.length}`);
     const stonFiltered = stonPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
-    console.log(`🔹 STON.fi Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${stonFiltered.length}`);
+    if (applyFilter) {
+      console.log(`🔹 STON.fi Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${stonFiltered.length}`);
+    }
     
     allPools.push(...stonFiltered);
   } catch (error) {
@@ -227,7 +257,7 @@ async function fetchNewTonPools(applyFilter = true) {
 
   while (!dedustSuccess && dedustRetries > 0) {
     try {
-      const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 8000 });
+      const dedustRes = await axios.get('https://api.dedust.io/v2/pools', { timeout: 10000 });
       dedustPoolsList = dedustRes.data || [];
       dedustSuccess = true;
     } catch (error) {
@@ -281,7 +311,9 @@ async function fetchNewTonPools(applyFilter = true) {
 
     console.log(`🔹 DeDust TON eşleşmeli havuz: ${dedustPools.length}`);
     const dedustFiltered = dedustPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
-    console.log(`🔹 DeDust Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${dedustFiltered.length}`);
+    if (applyFilter) {
+      console.log(`🔹 DeDust Minimum Likidite ($${MIN_LIQUIDITY_USD}) Filtresi Sonrası: ${dedustFiltered.length}`);
+    }
 
     allPools.push(...dedustFiltered);
   }
@@ -352,7 +384,6 @@ async function runSafetyAndBuy(pool, poolInfo) {
   const tokenName = pool.name;
   const liquidityUsd = Number(pool.reserve_in_usd || 0);
 
-  // Çift alım koruması: Cüzdanda zaten bu jettondan bakiye varsa yeni alım göndermeden pozisyona al
   try {
     const { wallet } = await getCtx();
     const existingBalance = await getWalletJettonBalance(wallet.address, tokenAddr);
@@ -492,23 +523,30 @@ async function startSniperWorkerLoop() {
       console.log("🚀 Sniper Worker döngüsü başlatılıyor (STON.fi & DeDust Aktif | Fark Modu)...");
       await updateTonPrice();
 
-      // Baseline: İlk taramada mevcut tüm havuzları MongoDB/seenPools'a 'old' olarak kaydet (alım yapma)
       const initialPools = await fetchNewTonPools(false);
-      let newBaselineAdded = 0;
+      const batchToSave = [];
+      const nowInit = Date.now();
+
       for (const p of (initialPools || [])) {
         if (!p || !p.address) continue;
         if (!seenPools[p.address]) {
-          seenPools[p.address] = {
-            status: 'old',
-            firstSeen: Date.now(),
-            attempts: 0,
-            lastLiquidityUsd: Number(p.reserve_in_usd || 0)
-          };
-          await saveSeenPoolToDb(p.address, seenPools[p.address]);
-          newBaselineAdded++;
+          batchToSave.push({
+            poolAddr: p.address,
+            poolData: {
+              status: 'old',
+              firstSeen: nowInit,
+              attempts: 0,
+              lastLiquidityUsd: Number(p.reserve_in_usd || 0)
+            }
+          });
         }
       }
-      console.log(`📌 Baseline hazır: Toplam ${Object.keys(seenPools).length} havuz kayıtlı (${newBaselineAdded} yeni baseline eklendi).`);
+
+      if (batchToSave.length > 0) {
+        console.log(`💾 ${batchToSave.length} baseline havuz toplu olarak kaydediliyor...`);
+        await saveSeenPoolsBatchToDb(batchToSave);
+      }
+      console.log(`📌 Baseline hazır: Toplam ${Object.keys(seenPools).length} havuz kayıtlı (${batchToSave.length} yeni baseline eklendi).`);
 
       while (botRunning) {
         let pools = [];
@@ -523,17 +561,15 @@ async function startSniperWorkerLoop() {
         const now = Date.now();
         const totalRawTonPools = pools.length;
 
-        // 1. Aşama: Fark (Diff) - Daha önce 'old'/bitmiş/alınmış olmayanlar veya aktif takiptekiler
         const candidatePools = pools.filter(pool => {
           if (!pool || !pool.address || !pool.base_token_address) return false;
           if (activePositions[pool.base_token_address]) return false;
 
           const existing = seenPools[pool.address];
-          if (!existing) return true; // Tamamen yeni havuz (Set/seenPools farkı)
+          if (!existing) return true;
           return ['watching', 'pending', 'pending_unconfirmed'].includes(existing.status);
         });
 
-        // 2. Aşama: Likidite Eşiği veya Aktif Takip Havuzları
         const liquidityOrWatchPools = candidatePools.filter(pool => {
           const liquidityUsd = Number(pool.reserve_in_usd || 0);
           const existing = seenPools[pool.address];
