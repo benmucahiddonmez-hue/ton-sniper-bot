@@ -25,6 +25,7 @@ const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 30000; // 30 saniye likidite takip süresi
 const BUY_AMOUNT = 0.5;
+const MAX_UNCONFIRMED_CHECKS = 5;
 
 const TAKE_PROFIT_PERCENT = 35.0;
 const STOP_LOSS_PERCENT = 25.0;
@@ -298,13 +299,7 @@ async function checkSafetyWithSimulation(tokenAddress) {
     const response = await axios.get(`https://tonapi.io/v2/jettons/${tokenAddress}`, { headers, timeout: 8000 });
     const data = response.data || {};
 
-    if (data.mintable === true) {
-      if (process.env.SKIP_MINT_CHECK === '1') {
-        console.log(`⚠️ Mint yetkisi AÇIK ama test modu nedeniyle atlandı: ${tokenAddress.substring(0, 10)}...`);
-      } else {
-        return { safe: false, reason: "MINT yetkisi açık!" };
-      }
-    }
+    if (data.mintable === true) return { safe: false, reason: "MINT yetkisi açık!" };
     if (data.can_freeze === true) return { safe: false, reason: "Freeze yetkisi aktif!" };
 
     return { safe: true };
@@ -314,16 +309,74 @@ async function checkSafetyWithSimulation(tokenAddress) {
   }
 }
 
+async function confirmLateJettonBalance(pool, poolInfo) {
+  const poolAddr = pool.address;
+  const tokenAddr = pool.base_token_address;
+  const tokenName = pool.name;
+
+  try {
+    const { wallet } = await getCtx();
+    const currentBalance = await getWalletJettonBalance(wallet.address, tokenAddr);
+    if (currentBalance > 0n) {
+      console.log(`✅ GECİKMELİ ONAY YAKALANDI (${pool.dex.toUpperCase()}): ${tokenAddr} | Bakiye: ${currentBalance.toString()}`);
+      poolInfo.status = 'bought';
+      await saveSeenPoolToDb(poolAddr, poolInfo);
+      await savePositionToDb(tokenAddr, {
+        entryPrice: BUY_AMOUNT,
+        poolAddr: pool.address,
+        dex: pool.dex,
+        amount: BUY_AMOUNT,
+        rawBalance: currentBalance.toString()
+      });
+      try {
+        await bot.sendMessage(ALLOWED_USER_ID, `✅ **ALIM ONAYLANDI (GECİKMELİ TEYİT - ${BUY_AMOUNT} TON - ${pool.dex.toUpperCase()})**\nToken: \`${tokenName}\``, { parse_mode: "Markdown" });
+      } catch (e) {}
+      return true;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Gecikmeli bakiye kontrolü hatası (${tokenAddr.substring(0, 10)}...):`, err.message);
+  }
+
+  poolInfo.attempts = (poolInfo.attempts || 0) + 1;
+  if (poolInfo.attempts >= MAX_UNCONFIRMED_CHECKS) {
+    console.log(`🚫 Onaylanmayan işlem sınırına ulaşıldı (${MAX_UNCONFIRMED_CHECKS} deneme): ${tokenAddr.substring(0, 10)}...`);
+    poolInfo.status = 'failed_permanently';
+  }
+  await saveSeenPoolToDb(poolAddr, poolInfo);
+  return false;
+}
+
 async function runSafetyAndBuy(pool, poolInfo) {
   const poolAddr = pool.address;
   const tokenAddr = pool.base_token_address;
   const tokenName = pool.name;
   const liquidityUsd = Number(pool.reserve_in_usd || 0);
 
+  // Çift alım koruması: Cüzdanda zaten bu jettondan bakiye varsa yeni alım göndermeden pozisyona al
+  try {
+    const { wallet } = await getCtx();
+    const existingBalance = await getWalletJettonBalance(wallet.address, tokenAddr);
+    if (existingBalance > 0n) {
+      console.log(`🛡️ Çift alım engellendi, cüzdanda bakiye bulundu (${tokenAddr.substring(0, 10)}...): ${existingBalance.toString()}`);
+      poolInfo.status = 'bought';
+      await saveSeenPoolToDb(poolAddr, poolInfo);
+      await savePositionToDb(tokenAddr, {
+        entryPrice: BUY_AMOUNT,
+        poolAddr: pool.address,
+        dex: pool.dex,
+        amount: BUY_AMOUNT,
+        rawBalance: existingBalance.toString()
+      });
+      return;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Ön bakiye kontrolü atlandı (${tokenAddr.substring(0, 10)}...):`, err.message);
+  }
+
   console.log(`⏳ Güvenlik testi yapılıyor (${pool.dex.toUpperCase()} | $${liquidityUsd.toFixed(2)}): ${tokenAddr.substring(0, 10)}...`);
   const safety = await checkSafetyWithSimulation(tokenAddr);
   if (safety.transient) {
-    return; // Geçici API hatasında bir sonraki turda tekrar dene
+    return;
   }
 
   if (!safety.safe) {
@@ -333,14 +386,7 @@ async function runSafetyAndBuy(pool, poolInfo) {
     return;
   }
 
-  console.log(`🛡️ Güvenlik testi BAŞARILI: ${tokenAddr.substring(0, 10)}... Alım aşaması.`);
-
-  if (process.env.DRY_RUN === '1') {
-    console.log(`🧪 [DRY_RUN] Gerçek alım atlandı (${pool.dex.toUpperCase()} | $${liquidityUsd.toFixed(2)}): ${tokenAddr} | Tutar: ${BUY_AMOUNT} TON`);
-    poolInfo.status = 'dry_run_checked';
-    await saveSeenPoolToDb(poolAddr, poolInfo);
-    return;
-  }
+  console.log(`🛡️ Güvenlik testi BAŞARILI: ${tokenAddr.substring(0, 10)}... Alım tetikleniyor.`);
 
   let buyResult = { success: false, error: "Bilinmeyen hata" };
 
@@ -376,7 +422,9 @@ async function runSafetyAndBuy(pool, poolInfo) {
   } else {
     console.error(`❌ Alım başarısız (${pool.dex.toUpperCase()} - ${tokenAddr}):`, buyResult.error);
     if (buyResult.unconfirmed) {
-      poolInfo.status = 'pending';
+      poolInfo.status = 'pending_unconfirmed';
+      poolInfo.attempts = (poolInfo.attempts || 0) + 1;
+      console.log(`⏳ İşlem onayı bekleniyor (Deneme ${poolInfo.attempts}/${MAX_UNCONFIRMED_CHECKS}): ${tokenAddr.substring(0, 10)}...`);
     } else {
       poolInfo.status = 'failed_permanently';
     }
@@ -505,6 +553,11 @@ async function startSniperWorkerLoop() {
 
           let poolInfo = seenPools[poolAddr];
           poolInfo.lastLiquidityUsd = liquidityUsd;
+
+          if (poolInfo.status === 'pending_unconfirmed') {
+            await confirmLateJettonBalance(pool, poolInfo);
+            continue;
+          }
 
           if (poolInfo.status === 'watching') {
             const elapsed = now - poolInfo.firstSeen;
