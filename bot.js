@@ -293,11 +293,18 @@ async function checkSafetyWithSimulation(tokenAddress) {
     const response = await axios.get(`https://tonapi.io/v2/jettons/${tokenAddress}`, { headers, timeout: 8000 });
     const data = response.data || {};
 
-    if (data.mintable === true) return { safe: false, reason: "MINT yetkisi açık!" };
+    if (data.mintable === true) {
+      if (process.env.SKIP_MINT_CHECK === '1') {
+        console.log(`⚠️ Mint yetkisi AÇIK ama test modu nedeniyle atlandı: ${tokenAddress.substring(0, 10)}...`);
+      } else {
+        return { safe: false, reason: "MINT yetkisi açık!" };
+      }
+    }
     if (data.can_freeze === true) return { safe: false, reason: "Freeze yetkisi aktif!" };
 
     return { safe: true };
   } catch (error) {
+    console.error(`⚠️ Güvenlik API hatası (${tokenAddress.substring(0, 10)}...):`, error.message);
     return { safe: false, transient: true, reason: "API geçici hatası" };
   }
 }
@@ -409,6 +416,14 @@ async function startSniperWorkerLoop() {
 
             if (safety.safe) {
               console.log(`🛡️ Güvenlik testi BAŞARILI: ${tokenAddr.substring(0, 10)}... Alım tetikleniyor.`);
+
+              if (process.env.DRY_RUN === '1') {
+                console.log(`🧪 [DRY_RUN] Gerçek alım atlandı (${pool.dex.toUpperCase()}): ${tokenAddr} | Tutar: ${BUY_AMOUNT} TON`);
+                poolInfo.status = 'dry_run_checked';
+                await saveSeenPoolToDb(poolAddr, poolInfo);
+                continue;
+              }
+
               let buyResult = { success: false, error: "Bilinmeyen hata" };
 
               if (pool.dex === 'stonfi') {
