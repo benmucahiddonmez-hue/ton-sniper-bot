@@ -24,7 +24,6 @@ let lastPriceUpdate = 0;
 const MIN_LIQUIDITY_USD = 40.0;
 const SCAN_INTERVAL = 30000;
 const POOL_MATURITY_DELAY = 30000; // 30 saniye likidite takip süresi
-const MAX_POOL_AGE_MS = 10 * 60 * 1000; // Zaman alanı varsa en fazla 10 dk'lık havuzları "yeni" say
 const BUY_AMOUNT = 0.5;
 const MAX_UNCONFIRMED_CHECKS = 5;
 
@@ -44,77 +43,6 @@ function normalizeAddress(addr) {
   } catch (e) {
     return String(addr).toLowerCase().trim();
   }
-}
-
-// API'den gelebilecek zaman alanını milisaniyeye çevirir (saniye vs ms karışıklığını önler)
-function parsePoolCreatedAtMs(rawPool) {
-  if (!rawPool || typeof rawPool !== 'object') return null;
-
-  const candidates = [
-    rawPool.created_at,
-    rawPool.createdAt,
-    rawPool.timestamp,
-    rawPool.created_timestamp,
-    rawPool.last_updated,
-    rawPool.updated_at
-  ];
-
-  for (const val of candidates) {
-    if (val === undefined || val === null || val === '') continue;
-
-    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-      // 1e12'den küçükse Unix saniye kabul et, ms'ye çevir
-      return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-    }
-
-    if (typeof val === 'string') {
-      const trimmed = val.trim();
-      if (/^\d+(\.\d+)?$/.test(trimmed)) {
-        const num = Number(trimmed);
-        if (Number.isFinite(num) && num > 0) {
-          return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-        }
-      }
-      const parsedDate = Date.parse(trimmed);
-      if (Number.isFinite(parsedDate) && parsedDate > 0) {
-        return parsedDate;
-      }
-    }
-  }
-
-  return null;
-}
-
-function formatAgeText(createdAtMs) {
-  if (!createdAtMs) return "zaman bilgisi yok";
-  const diffSec = Math.max(0, Math.floor((Date.now() - createdAtMs) / 1000));
-  if (diffSec < 60) return `${diffSec}sn önce`;
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}dk ${diffSec % 60}sn önce`;
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `${diffHour}sa ${diffMin % 60}dk önce`;
-  const diffDay = Math.floor(diffHour / 24);
-  return `${diffDay}g ${diffHour % 24}sa önce`;
-}
-
-function logNewestPools(dexLabel, pools) {
-  const withTime = pools
-    .filter(p => typeof p.createdAtMs === 'number' && p.createdAtMs > 0)
-    .sort((a, b) => b.createdAtMs - a.createdAtMs)
-    .slice(0, 5);
-
-  if (withTime.length === 0) {
-    console.log(`🕒 [${dexLabel}] API yanıtında geçerli oluşturulma zamanı alanı bulunamadı (en yeni 5 havuz loglanamıyor).`);
-    return;
-  }
-
-  console.log(`🕒 [${dexLabel}] En yeni ${withTime.length} havuzun oluşturulma zamanı:`);
-  withTime.forEach((p, idx) => {
-    const iso = new Date(p.createdAtMs).toISOString();
-    console.log(
-      `   ${idx + 1}. ${String(p.address || '').substring(0, 12)}... | ${iso} (${formatAgeText(p.createdAtMs)}) | $${Number(p.reserve_in_usd || 0).toFixed(2)}`
-    );
-  });
 }
 
 const PTON_SET = new Set([
@@ -209,7 +137,7 @@ async function initDatabase() {
     });
 
     await reconcilePositions();
-    console.log("🗄️ MongoDB bağlantısı ve veri senkronizasyonu başarılı.");
+    console.log(`🗄️ MongoDB bağlantısı başarılı. Kayıtlı havuz baseline: ${Object.keys(seenPools).length}`);
   } catch (err) {
     console.error("❌ MongoDB Bağlantı Hatası:", err.message);
   }
@@ -275,16 +203,13 @@ async function fetchNewTonPools(applyFilter = true) {
       if (!baseTokenAddress) return null;
 
       return {
-        address: p.address,
+        address: normalizeAddress(p.address),
         dex: 'stonfi',
         name: `TOKEN/TON (STON.fi)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
-        base_token_address: baseTokenAddress,
-        createdAtMs: parsePoolCreatedAtMs(p)
+        base_token_address: baseTokenAddress
       };
     }).filter(p => p !== null);
-
-    logNewestPools("STON.fi", stonPools);
 
     console.log(`🔹 STON.fi TON eşleşmeli havuz: ${stonPools.length}`);
     const stonFiltered = stonPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
@@ -346,16 +271,13 @@ async function fetchNewTonPools(applyFilter = true) {
       if (!tokenAsset || !tokenAsset.address) return null;
 
       return {
-        address: p.address || p.id,
+        address: normalizeAddress(p.address || p.id),
         dex: 'dedust',
         name: `TOKEN/TON (DeDust)`,
         reserve_in_usd: rTonLike * 2 * TON_PRICE_USD,
-        base_token_address: normalizeAddress(tokenAsset.address),
-        createdAtMs: parsePoolCreatedAtMs(p)
+        base_token_address: normalizeAddress(tokenAsset.address)
       };
     }).filter(p => p !== null);
-
-    logNewestPools("DeDust", dedustPools);
 
     console.log(`🔹 DeDust TON eşleşmeli havuz: ${dedustPools.length}`);
     const dedustFiltered = dedustPools.filter(p => !applyFilter || p.reserve_in_usd >= MIN_LIQUIDITY_USD);
@@ -567,11 +489,14 @@ async function monitorPositions() {
 async function startSniperWorkerLoop() {
   while (botRunning) {
     try {
-      console.log("🚀 Sniper Worker döngüsü başlatılıyor (STON.fi & DeDust Aktif)...");
+      console.log("🚀 Sniper Worker döngüsü başlatılıyor (STON.fi & DeDust Aktif | Fark Modu)...");
       await updateTonPrice();
 
-      let initialPools = await fetchNewTonPools(false);
+      // Baseline: İlk taramada mevcut tüm havuzları MongoDB/seenPools'a 'old' olarak kaydet (alım yapma)
+      const initialPools = await fetchNewTonPools(false);
+      let newBaselineAdded = 0;
       for (const p of (initialPools || [])) {
+        if (!p || !p.address) continue;
         if (!seenPools[p.address]) {
           seenPools[p.address] = {
             status: 'old',
@@ -580,8 +505,10 @@ async function startSniperWorkerLoop() {
             lastLiquidityUsd: Number(p.reserve_in_usd || 0)
           };
           await saveSeenPoolToDb(p.address, seenPools[p.address]);
+          newBaselineAdded++;
         }
       }
+      console.log(`📌 Baseline hazır: Toplam ${Object.keys(seenPools).length} havuz kayıtlı (${newBaselineAdded} yeni baseline eklendi).`);
 
       while (botRunning) {
         let pools = [];
@@ -596,26 +523,18 @@ async function startSniperWorkerLoop() {
         const now = Date.now();
         const totalRawTonPools = pools.length;
 
-        // 1. Aşama: Yaş / Yeni Havuz Kontrolü
-        const agePassedPools = pools.filter(pool => {
-          if (!pool || !pool.base_token_address) return false;
+        // 1. Aşama: Fark (Diff) - Daha önce 'old'/bitmiş/alınmış olmayanlar veya aktif takiptekiler
+        const candidatePools = pools.filter(pool => {
+          if (!pool || !pool.address || !pool.base_token_address) return false;
           if (activePositions[pool.base_token_address]) return false;
 
           const existing = seenPools[pool.address];
-          if (existing && existing.status === 'old') return false;
-          if (existing && ['expired', 'failed_permanently', 'bought', 'dry_run_checked'].includes(existing.status)) return false;
-
-          if (!existing && typeof pool.createdAtMs === 'number' && pool.createdAtMs > 0) {
-            const ageMs = now - pool.createdAtMs;
-            if (ageMs > MAX_POOL_AGE_MS) {
-              return false;
-            }
-          }
-          return true;
+          if (!existing) return true; // Tamamen yeni havuz (Set/seenPools farkı)
+          return ['watching', 'pending', 'pending_unconfirmed'].includes(existing.status);
         });
 
-        // 2. Aşama: Likidite Eşiği veya Aktif 30sn Takip Havuzları
-        const liquidityOrWatchPools = agePassedPools.filter(pool => {
+        // 2. Aşama: Likidite Eşiği veya Aktif Takip Havuzları
+        const liquidityOrWatchPools = candidatePools.filter(pool => {
           const liquidityUsd = Number(pool.reserve_in_usd || 0);
           const existing = seenPools[pool.address];
           const isTracked = existing && ['watching', 'pending', 'pending_unconfirmed'].includes(existing.status);
@@ -625,7 +544,7 @@ async function startSniperWorkerLoop() {
         let watchingCount = 0;
         let safetyPassedCount = 0;
 
-        for (const pool of agePassedPools) {
+        for (const pool of candidatePools) {
           if (!botRunning) break;
 
           const poolAddr = pool.address;
@@ -641,7 +560,7 @@ async function startSniperWorkerLoop() {
                 lastLiquidityUsd: liquidityUsd
               };
               await saveSeenPoolToDb(poolAddr, newPoolInfo);
-              console.log(`⚡ YENİ HAVUZ ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}) YAKALANDI (${pool.dex.toUpperCase()}): ${poolAddr.substring(0, 10)}... Doğrudan güvenlik kontrolüne geçiliyor.`);
+              console.log(`⚡ YENİ HAVUZ ($${liquidityUsd.toFixed(2)} >= $${MIN_LIQUIDITY_USD}) YAKALANDI (${pool.dex.toUpperCase()}): ${poolAddr.substring(0, 10)}... Güvenlik kontrolüne geçiliyor.`);
               const res = await runSafetyAndBuy(pool, newPoolInfo);
               if (res?.passedSafety) safetyPassedCount++;
             } else {
@@ -697,7 +616,7 @@ async function startSniperWorkerLoop() {
         }
 
         console.log(
-          `📉 Filtre Hunisi -> Ham TON Havuz: ${totalRawTonPools} | Yaş/Yeni: ${agePassedPools.length} | Likidite/Takip: ${liquidityOrWatchPools.length} | Güvenlik Geçen: ${safetyPassedCount} | Aktif Takip: ${watchingCount}`
+          `📉 Filtre Hunisi -> Ham TON Havuz: ${totalRawTonPools} | Yeni/Takip (Diff): ${candidatePools.length} | Likidite/Takip: ${liquidityOrWatchPools.length} | Güvenlik Geçen: ${safetyPassedCount} | Aktif Takip: ${watchingCount}`
         );
         await new Promise(resolve => setTimeout(resolve, SCAN_INTERVAL));
       }
